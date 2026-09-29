@@ -72,6 +72,21 @@ export const updateUserPasswordHash = (db: SQLiteDatabase, id: number, hash: str
     id,
   ]);
 
+/**
+ * Records which file holds the student's picture, or clears it with `null`.
+ *
+ * Separate from `updateUserProfile` on purpose. That call rewrites every profile
+ * field from a form's values, so folding the avatar into it would mean a picture
+ * change silently had to be threaded through the same React Hook Form that owns
+ * the name — and a student removing their picture would then have to save the
+ * whole form to make it stick. One column, one statement, one caller.
+ */
+export const updateUserAvatar = (db: SQLiteDatabase, id: number, path: string | null) =>
+  db.runAsync('UPDATE users SET avatar_path = ?, updated_at = datetime(\'now\') WHERE id = ?', [
+    path,
+    id,
+  ]);
+
 export const deleteUser = (db: SQLiteDatabase, id: number) =>
   db.runAsync('DELETE FROM users WHERE id = ?', [id]);
 

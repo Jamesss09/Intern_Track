@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -6,10 +6,12 @@ import { z } from 'zod';
 import { useApp } from '@/hooks/useApp';
 import { useTheme } from '@/hooks/useTheme';
 import { Avatar } from '@/components/Avatar';
+import { BottomSheet } from '@/components/BottomSheet';
 import { Button, ControlledField } from '@/components/FormField';
 import { ListRow } from '@/components/ListRow';
 import { ScreenHeader } from '@/components/ScreenHeader';
 import { contentWidth, fontSize, fontWeight, radius, spacing } from '@/constants/theme';
+import { resolveAvatarUri, recoverInterruptedPick } from '@/services/avatarService';
 
 const schema = z.object({
   full_name: z.string().min(2, 'Enter your full name'),
@@ -41,11 +43,73 @@ type ProfileValues = z.infer<typeof schema>;
  * hour with it.
  */
 export default function ProfileScreen() {
-  const { user, updateProfile, logout, busy } = useApp();
+  const { user, updateProfile, chooseAvatar, captureAvatar, removeAvatar, logout, busy } = useApp();
   const { colors: c, elevation } = useTheme();
   const styles = useMemo(() => createStyles(c), [c]);
 
   const [editing, setEditing] = useState(false);
+  const [photoSheet, setPhotoSheet] = useState(false);
+
+  /**
+   * The picture, resolved from the name in the database.
+   *
+   * `useMemo` on `user.avatar_path` rather than a state variable, because the
+   * name *is* the state. Holding a second copy of a path in React is how a
+   * screen ends up showing a picture the account no longer has — and it would
+   * also have to be reset in three places, each one a chance to forget.
+   * `resolveAvatarUri` returns `null` for a file that is gone, so a stale name
+   * renders as initials instead of a hole.
+   */
+  const avatarUri = useMemo(
+    () => resolveAvatarUri(user?.avatar_path),
+    [user?.avatar_path],
+  );
+
+  /**
+   * A pick that Android killed the activity for, waiting to be claimed.
+   *
+   * `expo-image-picker` documents that the system "sometimes kills the
+   * MainActivity after the ImagePicker finishes" and that
+   * `getPendingResultAsync` retrieves the result that was lost. Claiming it here
+   * rather than at launch is deliberate: filing the result needs a user id, and
+   * there is no signed-in user during the splash. In the ordinary case this
+   * resolves `null` immediately and costs one native call.
+   * → [[Avatar]]
+   */
+  useEffect(() => {
+    if (!user) return;
+
+    let active = true;
+    recoverInterruptedPick(user.id).then((saved) => {
+      // The component may be gone by the time this lands. Claiming into a dead
+      // screen would still store the file — correct — but the re-read that
+      // refreshes the avatar would have no one to read it for.
+      if (active && saved) setPhotoSheet(false);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [user]);
+
+  /**
+   * Every photo action closes the sheet first and acts second.
+   *
+   * The pickers and the camera are separate OS activities on top of this, and a
+   * sheet left open underneath one comes back to a student staring at a menu
+   * they already answered.
+   *
+   * Declared before the `if (!user) return null` below, because hooks called after
+   * a conditional return are not called on every render — and the render where
+   * `user` is still null is a real one, during sign-in.
+   */
+  const runPhotoAction = useCallback(
+    async (action: () => Promise<void>) => {
+      setPhotoSheet(false);
+      await action();
+    },
+    [],
+  );
 
   const { control, handleSubmit, reset } = useForm<ProfileValues>({
     resolver: zodResolver(schema),
@@ -84,12 +148,21 @@ export default function ProfileScreen() {
         <View style={[styles.card, styles.identityCard, elevation.sm]}>
           <View style={styles.identity}>
             {/*
-              No camera badge. The mockup's avatar carries one, but `Avatar`
-              documents why it stays off: there is no image picker in v1, and a
-              badge that looks tappable but does nothing is worse than none. It
-              turns on when picking lands.
+              Always pressable, edit mode or not. The picture is not one of the
+              form fields below — it has no value to type, no validation, and no
+              Save button holding it hostage — so it is changed the moment it is
+              chosen. Tying it to `editing` would mean a student who wants to swap
+              a photo has to first open a form they did not want to open.
             */}
-            <Avatar name={user.full_name} size={64} />
+            <Avatar
+              name={user.full_name}
+              size={64}
+              uri={avatarUri}
+              onPress={() => setPhotoSheet(true)}
+              accessibilityLabel={
+                avatarUri ? 'Change profile picture' : 'Add a profile picture'
+              }
+            />
 
             <View style={styles.identityText}>
               <Text style={styles.identityName} numberOfLines={1}>
@@ -171,6 +244,21 @@ export default function ProfileScreen() {
                 default is the year level anyway.
               */}
               {user.block ? <ListRow icon="grid-outline" label="Block" value={user.block} /> : null}
+              {/*
+                A row for the picture, so the thing that changes it is listed with
+                everything else that can be changed rather than being discovered by
+                tapping a face. It is absent when there is no picture: there is
+                nothing to describe, and the avatar's own camera badge is the
+                affordance that adds the first one.
+              */}
+              {avatarUri ? (
+                <ListRow
+                  icon="image-outline"
+                  label="Profile picture"
+                  value="On"
+                  onPress={() => setPhotoSheet(true)}
+                />
+              ) : null}
               <Button
                 label="Edit Details"
                 onPress={() => setEditing(true)}
@@ -191,6 +279,45 @@ export default function ProfileScreen() {
           <Button label="Sign Out" onPress={logout} variant="secondary" fullWidth />
         </View>
       </ScrollView>
+
+      {/*
+        The photo options.
+
+        A sheet rather than an `Alert` with three buttons, because an alert is
+        capped at three and cannot be styled, and this is the app's existing
+        idiom for exactly this — the records filter and every confirmation already
+        use `BottomSheet`. Three rows in a sheet also read as a menu, which is what
+        this is, rather than as three things that might happen.
+
+        `Remove` is `danger` and last. It is the only irreversible one — the file
+        is deleted, not hidden — so it is also the only one that needs its weight
+        to separate it from the other two, and it disappears entirely when there is
+        no picture rather than sitting there greyed out offering nothing.
+      */}
+      <BottomSheet
+        visible={photoSheet}
+        onClose={() => setPhotoSheet(false)}
+        title="Profile picture"
+      >
+        <ListRow
+          icon="images-outline"
+          label="Choose from photos"
+          onPress={() => runPhotoAction(chooseAvatar)}
+        />
+        <ListRow
+          icon="camera-outline"
+          label="Take a photo"
+          onPress={() => runPhotoAction(captureAvatar)}
+        />
+        {avatarUri ? (
+          <ListRow
+            icon="trash-outline"
+            label="Remove photo"
+            tone="danger"
+            onPress={() => runPhotoAction(removeAvatar)}
+          />
+        ) : null}
+      </BottomSheet>
     </View>
   );
 }

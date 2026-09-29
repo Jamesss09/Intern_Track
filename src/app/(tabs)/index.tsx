@@ -12,6 +12,7 @@ import { useTheme } from '@/hooks/useTheme';
 import { Button } from '@/components/FormField';
 import { ActionTile } from '@/components/ActionTile';
 import { Avatar } from '@/components/Avatar';
+import { resolveAvatarUri } from '@/services/avatarService';
 import { EmptyState } from '@/components/EmptyState';
 import { ListRow } from '@/components/ListRow';
 import { ProgressBar } from '@/components/ProgressBar';
@@ -144,7 +145,18 @@ export default function DashboardScreen() {
             ) : null}
           </View>
 
-          <Avatar name={user?.full_name ?? ''} size={56} onDark />
+          {/*
+            Read-only here. The Dashboard is not the place to change a profile
+            picture, and a second picker entry point on the first screen the
+            student sees is a claim the app cannot back up. It only has to *show*
+            the one the student set on Profile.
+          */}
+          <Avatar
+            name={user?.full_name ?? ''}
+            size={56}
+            uri={resolveAvatarUri(user?.avatar_path)}
+            onDark
+          />
         </View>
       </View>
 

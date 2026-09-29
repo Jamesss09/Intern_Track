@@ -149,6 +149,26 @@ export const MIGRATIONS: Migration[] = [
              am_time_out = time_out;
     `,
   },
+
+  // v5 adds `avatar_path` — the student's own profile picture.
+  //
+  // **A file NAME, not a URI.** The absolute path is resolved at render time by
+  // `avatarService.resolveAvatarUri`, because iOS does not guarantee the app's
+  // container path is the same on every launch, and a stored absolute path is
+  // one reinstall away from pointing at nothing. A name plus a directory the app
+  // owns is stable by construction. The same reasoning is why `pdfService`
+  // stores nothing on disk for the student to find later.
+  //
+  // Nullable and with no backfill: an existing account has no picture, and
+  // `Avatar` has always drawn initials, so `null` is the honest starting state
+  // rather than something to synthesise. `ALTER TABLE ... ADD COLUMN` does not
+  // rewrite the table, so this is cheap and cannot lose a row.
+  {
+    version: 5,
+    up: `
+      ALTER TABLE users ADD COLUMN avatar_path TEXT;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.reduce(

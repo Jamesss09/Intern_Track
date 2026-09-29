@@ -14,6 +14,7 @@
 import React, { createContext, useCallback, useEffect, useMemo, useReducer } from 'react';
 import type { Internship, InternshipSummary, User } from '@/types';
 import * as authService from '@/services/authService';
+import * as avatarService from '@/services/avatarService';
 import * as internshipService from '@/services/internshipService';
 import * as timeRecordService from '@/services/timeRecordService';
 
@@ -103,6 +104,21 @@ export interface AppContextValue extends AppState {
     year_level: string | null;
     block: string | null;
   }) => Promise<void>;
+  /**
+   * The three ways a profile picture changes. → [[Avatar]]
+   *
+   * Each re-reads the user and dispatches `profile` rather than patching the
+   * stored object, for the reason `updateInternship` does: the service and the
+   * filesystem are the source of truth, and a locally-patched copy is one more
+   * place for the picture and the row that names it to disagree.
+   *
+   * A cancelled pick resolves normally and changes nothing — the screen must not
+   * treat "the student backed out" as an error, or as a request to remove what
+   * they already had.
+   */
+  chooseAvatar: () => Promise<void>;
+  captureAvatar: () => Promise<void>;
+  removeAvatar: () => Promise<void>;
   deleteAccount: () => Promise<void>;
   refreshSummary: () => Promise<void>;
   clearError: () => void;
@@ -232,6 +248,40 @@ export const AppProvider = ({ children }: { children: React.ReactNode }) => {
     [state.user],
   );
 
+  /**
+   * One body for all three picture operations.
+   *
+   * `busy` covers the pick, the resize, the file copy and the re-read, because a
+   * crop of a 12-megapixel photo on a cheap Android is long enough that a student
+   * will tap again if nothing acknowledges the first tap.
+   */
+  const withAvatar = useCallback(
+    async (action: (userId: number, name: string | null) => Promise<unknown>) => {
+      const current = state.user;
+      if (!current) return;
+
+      dispatch({ type: 'busy', busy: true });
+      try {
+        await action(current.id, current.avatar_path);
+        // The picture is on disk now; the row naming it may not be. Re-reading is
+        // what makes "the file is there but the name is not" visible as "no
+        // picture" instead of as a blank circle.
+        const user = await authService.getUserById(current.id);
+        if (user) dispatch({ type: 'profile', user });
+      } catch (error) {
+        dispatch({ type: 'error', error: message(error) });
+        throw error;
+      }
+    },
+    [state.user],
+  );
+
+  const chooseAvatar = useCallback(() => withAvatar(avatarService.chooseAvatar), [withAvatar]);
+
+  const captureAvatar = useCallback(() => withAvatar(avatarService.captureAvatar), [withAvatar]);
+
+  const removeAvatar = useCallback(() => withAvatar(avatarService.removeAvatar), [withAvatar]);
+
   const deleteAccount = useCallback(async () => {
     if (!state.user) return;
     dispatch({ type: 'busy', busy: true });
@@ -255,6 +305,9 @@ export const AppProvider = ({ children }: { children: React.ReactNode }) => {
       saveInternship,
       updateInternship,
       updateProfile,
+      chooseAvatar,
+      captureAvatar,
+      removeAvatar,
       deleteAccount,
       refreshSummary,
       clearError,
@@ -267,6 +320,9 @@ export const AppProvider = ({ children }: { children: React.ReactNode }) => {
       saveInternship,
       updateInternship,
       updateProfile,
+      chooseAvatar,
+      captureAvatar,
+      removeAvatar,
       deleteAccount,
       refreshSummary,
       clearError,

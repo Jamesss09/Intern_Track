@@ -37,6 +37,14 @@
           "enableFileSharing": true,
           "supportsOpeningDocumentsInPlace": true
         }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "InternTrack uses your photo library only when you choose a profile picture, so you can see your own face instead of your initials.",
+          "cameraPermission": "InternTrack uses the camera only when you choose to take a new profile picture.",
+          "microphonePermission": false
+        }
       ]
     ]
   }

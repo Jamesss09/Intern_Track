@@ -30,6 +30,7 @@ const user = (over: Partial<User> = {}): User => ({
   course: 'BSIT',
   year_level: '3rd Year',
   block: '3A',
+  avatar_path: null,
   created_at: '',
   updated_at: null,
   ...over,

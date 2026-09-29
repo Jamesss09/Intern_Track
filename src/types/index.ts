@@ -26,6 +26,16 @@ export interface User {
    * so the value is captured rather than guessed.
    */
   block: string | null;
+  /**
+   * The student's profile picture, as a **file name** inside the app's own
+   * `avatars` directory — never an absolute path. → [[Avatar]]
+   *
+   * `null` means no picture, which is a real state and not a gap: `Avatar` has
+   * always drawn initials, and that is still what renders when this is `null`
+   * *or* when the named file has gone missing, which is why the name is resolved
+   * against the filesystem at render time rather than trusted.
+   */
+  avatar_path: string | null;
   /** `datetime('now')`, UTC. */
   created_at: string;
   updated_at: string | null;
