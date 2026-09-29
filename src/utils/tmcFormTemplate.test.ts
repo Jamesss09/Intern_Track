@@ -159,6 +159,36 @@ describe('buildDayRows — one row per numbered day', () => {
       expect(daysInMonthIso(monthIso)).toBe(buildDayRows(monthIso, []).length);
     }
   });
+
+  /**
+   * A `YYYY-MM` key must produce the same sheet as `YYYY-MM-DD`.
+   *
+   * The database names months `YYYY-MM` (`listMonthsWithRecords` groups with
+   * `substr(date, 1, 7)`), and the export screen once let that shape through
+   * into the month it printed. The failure was total and silent: `NaN` row
+   * count, a query matching no rows, and every record rejected by the month
+   * filter — so a letterhead, a title, an empty table and two signature lines,
+   * which is what a legitimate blank form also looks like.
+   *
+   * Pinned on both halves: the row count *and* the attendance. A test that only
+   * checked the length would pass on 30 empty rows, which is the other way this
+   * bug can hide.
+   */
+  it.each(['2026-09', '2026-01', '2026-02', '2028-02', '2026-12'])(
+    'prints the same populated sheet for %s as for its first of the month',
+    short => {
+      const records = [rec(`${short}-02`), rec(`${short}-17`)];
+      const fromShort = buildDayRows(short, records);
+      const fromLong = buildDayRows(`${short}-01`, records);
+
+      expect(fromShort).toEqual(fromLong);
+      expect(fromShort).toHaveLength(daysInMonthIso(short));
+      // The attendance itself, so an all-blank sheet cannot satisfy this.
+      expect(fromShort[1].amIn).toBe('8:00 AM');
+      expect(fromShort[1].amOut).toBe('5:00 PM');
+      expect(fromShort[16].amIn).toBe('8:00 AM');
+    },
+  );
 });
 
 describe('buildDayRows — the AM/PM rule', () => {

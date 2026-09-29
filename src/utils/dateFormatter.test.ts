@@ -63,6 +63,57 @@ describe('endOfMonthIso', () => {
   });
 });
 
+/**
+ * `YYYY-MM` is a real key in this app, not a malformed date.
+ *
+ * `listMonthsWithRecords` groups with `substr(date, 1, 7)`, so the database hands
+ * every month over in this shape. These tests exist because the alternative was
+ * silent: an un-defaulted `d` made `new Date(y, m - 1, undefined)`, an Invalid
+ * Date does not throw, and `NaN` then spread into the row count, the query
+ * bounds and the month filter in `buildDayRows`. The visible result was a fully
+ * rendered TMC form with an empty table — indistinguishable from a correct blank
+ * form, which is the exact failure `TmcMonthEmptyError` exists to prevent.
+ */
+describe('a YYYY-MM key means the first of that month', () => {
+  it.each([
+    ['daysInMonthIso', () => daysInMonthIso('2026-09'), 30],
+    ['daysInMonthIso (leap February)', () => daysInMonthIso('2028-02'), 29],
+    ['startOfMonthIso', () => startOfMonthIso('2026-09'), '2026-09-01'],
+    ['startOfMonthIso (December)', () => startOfMonthIso('2026-12'), '2026-12-01'],
+    ['endOfMonthIso', () => endOfMonthIso('2026-09'), '2026-09-30'],
+    ['endOfMonthIso (January)', () => endOfMonthIso('2026-01'), '2026-01-31'],
+    ['monthLabel', () => monthLabel('2026-09'), 'September 2026'],
+  ])('%s accepts a short key', (_name, call, expected) => {
+    expect(call()).toBe(expected);
+  });
+
+  it('agrees with the same month given as YYYY-MM-DD', () => {
+    for (const short of ['2026-01', '2026-02', '2028-02', '2026-09', '2026-12']) {
+      const long = `${short}-01`;
+      expect(daysInMonthIso(short)).toBe(daysInMonthIso(long));
+      expect(startOfMonthIso(short)).toBe(startOfMonthIso(long));
+      expect(endOfMonthIso(short)).toBe(endOfMonthIso(long));
+      expect(monthLabel(short)).toBe(monthLabel(long));
+    }
+  });
+
+  it('is a fixed point: normalising a short key does not change it', () => {
+    expect(startOfMonthIso('2026-09')).toBe('2026-09-01');
+    expect(startOfMonthIso(startOfMonthIso('2026-09'))).toBe('2026-09-01');
+  });
+
+  /**
+   * The two shapes are not interchangeable in a string comparison, and the
+   * difference is a prefix, which is exactly the case that slips through a
+   * range check. Every guard on the export screen is a `>=`/`<=` on these
+   * strings, and this is the direction that admits the wrong shape.
+   */
+  it('sorts before its own long form, so a range check admits it', () => {
+    expect('2026-09' <= '2026-09-01').toBe(true);
+    expect('2026-09' >= '2026-09-01').toBe(false);
+  });
+});
+
 describe('shiftMonthIso', () => {
   it('steps forwards and backwards one month', () => {
     expect(shiftMonthIso('2026-09-01', 1)).toBe('2026-10-01');

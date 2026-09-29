@@ -30,9 +30,20 @@ const monthOnly = new Intl.DateTimeFormat('en-US', { month: 'short' });
  * `new Date('2026-09-28')` is parsed as UTC midnight, which renders as the
  * previous day in any negative UTC offset. Splitting the parts and using
  * `new Date(y, m - 1, d)` keeps the calendar day correct everywhere.
+ *
+ * **A missing day means the 1st.** `YYYY-MM` is a real key in this app — it is
+ * what `substr(date, 1, 7)` returns, so it is how the database names a month —
+ * and a `YYYY-MM-DD` function has to accept it. Without the default,
+ * `new Date(2026, 8, undefined)` is an Invalid Date, and an Invalid Date does
+ * not throw: it propagates as `NaN` into `daysInMonthIso` (row count), into the
+ * `from`/`to` bounds of the month query (no rows match), and into the month
+ * filter in `buildDayRows` (every record rejected, since `x === NaN` is false).
+ * The result is a fully rendered form with an empty table — a blank document
+ * that looks like a successful print. Defaulting the day turns that whole class
+ * of silent failure into the obvious reading: the first of the month.
  */
 export const parseIsoDate = (iso: string): Date => {
-  const [y, m, d] = iso.split('-').map(Number);
+  const [y, m, d = 1] = iso.split('-').map(Number);
   return new Date(y, m - 1, d);
 };
 
