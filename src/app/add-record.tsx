@@ -20,10 +20,18 @@ import { Button, ControlledField } from '@/components/FormField';
 import { ScreenHeader } from '@/components/ScreenHeader';
 import { BottomSheet } from '@/components/BottomSheet';
 import { CalendarPicker } from '@/components/CalendarPicker';
+import { TimePickerField } from '@/components/TimePickerField';
 import * as timeRecordService from '@/services/timeRecordService';
-import { TimeCalculationError, computeTotalMinutes, minutesToHours } from '@/utils/timeCalculator';
+import {
+  TimeCalculationError,
+  computeDayMinutes,
+  daySpan,
+  minutesToHours,
+  SESSION_KEYS,
+  type DaySessions,
+} from '@/utils/timeCalculator';
 import { formatBreak, formatHours } from '@/utils/progressCalculator';
-import { formatDateWithWeekday, todayIso } from '@/utils/dateFormatter';
+import { formatDateWithWeekday, formatTime12h, todayIso } from '@/utils/dateFormatter';
 import {
   DateRestrictionError,
   RESTRICTION_HINT,
@@ -42,7 +50,6 @@ import {
 } from '@/constants/theme';
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-const HHMM = /^([01]?\d|2[0-3]):[0-5]\d$/;
 
 const schema = z
   .object({
@@ -51,14 +58,10 @@ const schema = z
       .min(1, 'Date is required')
       .regex(ISO_DATE, 'Use the format YYYY-MM-DD')
       .refine((v) => !Number.isNaN(Date.parse(v)), 'That is not a real date'),
-    time_in: z
-      .string()
-      .min(1, 'Time in is required')
-      .refine((v) => HHMM.test(v), 'Use a 24-hour time like 08:00'),
-    time_out: z
-      .string()
-      .min(1, 'Time out is required')
-      .refine((v) => HHMM.test(v), 'Use a 24-hour time like 17:00'),
+    am_in: z.string().nullable(),
+    am_out: z.string().nullable(),
+    pm_in: z.string().nullable(),
+    pm_out: z.string().nullable(),
     break: z
       .string()
       .min(1, 'Enter a break length, or 0')
@@ -71,8 +74,27 @@ const schema = z
     notes: z.string().optional(),
   })
   .superRefine((values, ctx) => {
-    // Run the real calculator so the error the user sees is the same one the
-    // database would reject the row for.
+    /**
+     * Run the real calculator so the error the user sees is the same one the
+     * database would reject the row for.
+     *
+     * The issue is attached to the *session* rather than to a single field,
+     * because a half-filled pair is one mistake with two halves: marking only
+     * `am_in` as wrong would tell the student their time in is invalid when it
+     * is their time out they never entered.
+     */
+    const hasAM = Boolean(values.am_in || values.am_out);
+    const hasPM = Boolean(values.pm_in || values.pm_out);
+
+    if (!hasAM && !hasPM) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['am_in'],
+        message: 'Enter at least one session — AM or PM time in and time out',
+      });
+      return;
+    }
+
     try {
       const breakMinutes = timeRecordService.parseBreakInput(values.break);
       if (breakMinutes === null) {
@@ -83,13 +105,12 @@ const schema = z
         });
         return;
       }
-      computeTotalMinutes(values.time_in, values.time_out, breakMinutes);
+
+      computeDayMinutes(values as DaySessions, breakMinutes);
     } catch (error) {
-      ctx.addIssue({
-        code: 'custom',
-        path: ['break'],
-        message: error instanceof Error ? error.message : 'Check the times',
-      });
+      const message = error instanceof Error ? error.message : 'Check the times';
+      const field = message.startsWith('AM') ? 'am_out' : message.startsWith('PM') ? 'pm_out' : 'break';
+      ctx.addIssue({ code: 'custom', path: [field], message });
     }
   });
 
@@ -120,8 +141,14 @@ export default function AddRecordScreen() {
     resolver: zodResolver(schema),
     defaultValues: {
       date: todayIso(),
-      time_in: '08:00',
-      time_out: '17:00',
+      // A school day by default: an 8-to-5 morning session and a 1-to-5
+      // afternoon, with a 1-hour lunch. Every one is replaceable from the
+      // pickers, and starting blank would mean a student who only worked a
+      // morning has to clear three fields they never meant to fill.
+      am_in: '08:00',
+      am_out: '12:00',
+      pm_in: '13:00',
+      pm_out: '17:00',
       break: '60',
       notes: '',
     },
@@ -138,8 +165,14 @@ export default function AddRecordScreen() {
       if (!record) return;
       setExistingDate(record.date);
       setValue('date', record.date);
-      setValue('time_in', record.time_in);
-      setValue('time_out', record.time_out);
+      // Null-safe, not `?? record.time_in`: a row written before migration v4
+      // has no PM session, and backfilling it from the day's span here would
+      // re-invent the afternoon the student deliberately left blank. The AM pair
+      // still falls back, because before v4 that is where the only session was.
+      setValue('am_in', record.am_time_in ?? record.time_in);
+      setValue('am_out', record.am_time_out ?? record.time_out);
+      setValue('pm_in', record.pm_time_in);
+      setValue('pm_out', record.pm_time_out);
       setValue('break', String(record.break_minutes));
       setValue('notes', record.notes ?? '');
     });
@@ -168,13 +201,22 @@ export default function AddRecordScreen() {
     }, [isEdit, setValue]),
   );
 
-  // Live duration preview, so the effect of the break is visible before saving.
-  // `useWatch` rather than `watch`, because the latter returns a function the
-  // React Compiler refuses to memoise.
-  const [date, timeIn, timeOut, brk] = useWatch({
+  /**
+   * Live duration preview, so the effect of the break and of the two sessions is
+   * visible before saving. `useWatch` rather than `watch`, because the latter
+   * returns a function the React Compiler refuses to memoise.
+   */
+  const [date, brk, ...times] = useWatch({
     control,
-    name: ['date', 'time_in', 'time_out', 'break'],
+    name: ['date', 'break', ...SESSION_KEYS],
   });
+
+  const sessions: DaySessions = {
+    am_in: (times[0] as string | null) ?? null,
+    am_out: (times[1] as string | null) ?? null,
+    pm_in: (times[2] as string | null) ?? null,
+    pm_out: (times[3] as string | null) ?? null,
+  };
 
   /**
    * The date field renders its own error, because it is a `Pressable` and not a
@@ -182,14 +224,44 @@ export default function AddRecordScreen() {
    */
   const dateError = formState.errors.date?.message;
 
+  const breakMinutes = timeRecordService.parseBreakInput(brk);
+
+  /**
+   * `null` means "these times do not describe a loggable day yet".
+   *
+   * Deliberately a silent failure: this runs on every keystroke of the break
+   * field, and an exception would have to be caught to render. The real message
+   * comes from the schema on submit, and from the service if the form is somehow
+   * bypassed — the preview only has to stop claiming a number it cannot compute.
+   */
   const preview = (() => {
-    const breakMinutes = timeRecordService.parseBreakInput(brk);
     if (breakMinutes === null) return null;
     try {
-      return computeTotalMinutes(timeIn, timeOut, breakMinutes);
+      return computeDayMinutes(sessions, breakMinutes);
     } catch {
       return null;
     }
+  })();
+
+  /** The day's overall range, or null while the sessions are still incomplete. */
+  const span = (() => {
+    try {
+      return daySpan(sessions);
+    } catch {
+      return null;
+    }
+  })();
+
+  /**
+   * `time_in`–`time_out` as the student reads it, for under the total.
+   *
+   * Shown because that pair is still what the Records list and the printed form
+   * display as the day's range: a student checking their hours wants to see the
+   * same span they will find elsewhere, not four separate cells to add up.
+   */
+  const spanLabel = (() => {
+    if (!span || span.time_in === null || span.time_out === null) return null;
+    return `${formatTime12h(span.time_in)} – ${formatTime12h(span.time_out)}`;
   })();
 
   const onSubmit = handleSubmit(async (values) => {
@@ -214,8 +286,7 @@ export default function AddRecordScreen() {
       if (isEdit && recordId !== null) {
         await timeRecordService.updateRecord(recordId, {
           date: values.date,
-          time_in: values.time_in,
-          time_out: values.time_out,
+          ...sessions,
           break_minutes: breakMinutes,
           notes: values.notes || null,
         });
@@ -223,8 +294,7 @@ export default function AddRecordScreen() {
         await timeRecordService.createRecord({
           internship_id: internship.id,
           date: values.date,
-          time_in: values.time_in,
-          time_out: values.time_out,
+          ...sessions,
           break_minutes: breakMinutes,
           notes: values.notes || null,
         });
@@ -278,8 +348,6 @@ export default function AddRecordScreen() {
     );
   }
 
-  const breakMinutes = timeRecordService.parseBreakInput(brk);
-
   return (
     <KeyboardAvoidingView
       style={styles.flex}
@@ -309,6 +377,8 @@ export default function AddRecordScreen() {
           <Text style={[styles.previewValue, preview === null && styles.previewInvalid]}>
             {preview === null ? '-' : `${formatHours(minutesToHours(preview))} hrs`}
           </Text>
+
+          {spanLabel ? <Text style={styles.previewSpan}>{spanLabel}</Text> : null}
 
           {preview !== null && breakMinutes !== null ? (
             <Text style={styles.previewHint}>
@@ -379,24 +449,62 @@ export default function AddRecordScreen() {
             />
           </BottomSheet>
 
-          <View style={styles.row}>
-            <View style={styles.rowItem}>
-              <ControlledField
-                control={control}
-                name="time_in"
-                label="Time in"
-                autoCapitalize="none"
-                placeholder="08:00"
-              />
+          {/**
+           * Two blocks of two, not four fields in a line.
+           *
+           * The TMC form prints AM and PM as separate pairs of cells, so the
+           * screen mirrors that: a student reading their own signature back
+           * later finds the same grouping here. PM is marked optional because an
+           * afternoon-only or morning-only shift is an ordinary day, not a
+           * mistake — but the fields stay visible rather than being hidden behind
+           * a toggle, since a field a student cannot see is one they will not
+           * look for.
+           */}
+          <View style={styles.sessionBlock}>
+            <View style={styles.row}>
+              <View style={styles.rowItem}>
+                <TimePickerField
+                  label="AM Time In"
+                  session="AM"
+                  value={sessions.am_in}
+                  error={formState.errors.am_in?.message}
+                  onChange={(value) => setValue('am_in', value, { shouldValidate: true })}
+                />
+              </View>
+              <View style={styles.rowItem}>
+                <TimePickerField
+                  label="AM Time Out"
+                  session="AM"
+                  value={sessions.am_out}
+                  error={formState.errors.am_out?.message}
+                  onChange={(value) => setValue('am_out', value, { shouldValidate: true })}
+                />
+              </View>
             </View>
-            <View style={styles.rowItem}>
-              <ControlledField
-                control={control}
-                name="time_out"
-                label="Time out"
-                autoCapitalize="none"
-                placeholder="17:00"
-              />
+          </View>
+
+          <View style={styles.sessionBlock}>
+            <View style={styles.row}>
+              <View style={styles.rowItem}>
+                <TimePickerField
+                  label="PM Time In"
+                  session="PM"
+                  optional
+                  value={sessions.pm_in}
+                  error={formState.errors.pm_in?.message}
+                  onChange={(value) => setValue('pm_in', value, { shouldValidate: true })}
+                />
+              </View>
+              <View style={styles.rowItem}>
+                <TimePickerField
+                  label="PM Time Out"
+                  session="PM"
+                  optional
+                  value={sessions.pm_out}
+                  error={formState.errors.pm_out?.message}
+                  onChange={(value) => setValue('pm_out', value, { shouldValidate: true })}
+                />
+              </View>
             </View>
           </View>
 
@@ -406,7 +514,7 @@ export default function AddRecordScreen() {
             label="Unpaid break"
             autoCapitalize="none"
             placeholder="60"
-            hint="In minutes (60) or hours (1h 30)."
+            hint="In minutes (60) or hours (1h 30). Taken off the day once, not off each session."
           />
 
           <ControlledField
@@ -461,6 +569,11 @@ const createStyles = (c: ReturnType<typeof useTheme>['colors']) =>
      * *vertical* axis, collapsing the row to zero height.
      */
     rowItem: { flex: 1, minWidth: 140 },
+    /**
+     * Wraps one session's pair of fields so the AM group and the PM group are
+     * visually separate blocks rather than a single run of four inputs.
+     */
+    sessionBlock: { gap: spacing.xs },
     notes: { minHeight: 88, textAlignVertical: 'top' },
 
     dateField: { gap: spacing.xs },
@@ -537,6 +650,17 @@ const createStyles = (c: ReturnType<typeof useTheme>['colors']) =>
       fontWeight: fontWeight.medium,
       color: c.primaryOnSoft,
       opacity: 0.85,
+    },
+    /**
+     * The day's overall span, printed between the total and the break note so the
+     * three read top to bottom as: hours, when, what was deducted.
+     */
+    previewSpan: {
+      fontSize: fontSize.sm,
+      fontWeight: fontWeight.medium,
+      color: c.primaryOnSoft,
+      opacity: 0.85,
+      marginBottom: spacing.xxs,
     },
     previewHintMuted: {
       fontSize: fontSize.xs,

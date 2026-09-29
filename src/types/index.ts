@@ -54,10 +54,25 @@ export interface TimeRecord {
   internship_id: number;
   /** ISO date `YYYY-MM-DD`. Sorts chronologically as a string. */
   date: string;
-  /** 24-hour `HH:MM`. Never store 12-hour `'8:00 AM'`. */
+  /**
+   * The day's overall span, derived from the four session times below.
+   *
+   * Kept because the Records list and the detailed log show a single
+   * `8:00 AM – 5:00 PM` range, and because a form that shows one range while
+   * storing four times is a form two code paths can disagree about. Never
+   * computed here — see `utils/timeCalculator` -> `daySpan`.
+   */
   time_in: string;
   /** 24-hour `HH:MM`. */
   time_out: string;
+  /** AM Time In. 24-hour `HH:MM`, or null when no morning session was worked. */
+  am_time_in: string | null;
+  /** AM Time Out. */
+  am_time_out: string | null;
+  /** PM Time In. */
+  pm_time_in: string | null;
+  /** PM Time Out. */
+  pm_time_out: string | null;
   break_minutes: number;
   /**
    * Authoritative duration in integer minutes. All arithmetic happens here so
@@ -94,12 +109,23 @@ export interface NewInternship {
   end_date?: string | null;
 }
 
-/** Fields required to create a time record. Durations are computed, not accepted. */
+/**
+ * Fields required to create a time record.
+ *
+ * Durations and the day span are computed, not accepted — see
+ * `utils/timeCalculator`. A session is either fully given (both of its times) or
+ * fully absent (both `null`); a half-filled one is rejected rather than treated
+ * as missing.
+ */
 export interface NewTimeRecord {
   internship_id: number;
   date: string;
   time_in: string;
   time_out: string;
+  am_time_in: string | null;
+  am_time_out: string | null;
+  pm_time_in: string | null;
+  pm_time_out: string | null;
   break_minutes: number;
   total_minutes: number;
   total_hours: number;
@@ -123,7 +149,7 @@ export interface InternshipSummary {
  *
  * Bounds are inclusive and stored in the same ISO `YYYY-MM-DD` form as
  * `time_records.date`, which compares correctly as a string — no date parsing
- * happens in SQL. → [[Open Questions|Q8]]
+ * happens in SQL. → [[Open Questions|R15]]
  */
 export interface TimeRecordFilter {
   /** Inclusive lower bound, or null for no lower bound. */

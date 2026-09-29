@@ -18,7 +18,7 @@ import {
   courseBlock,
   type TmcFormData,
 } from '@/utils/tmcFormTemplate';
-import { formatTime12h } from '@/utils/dateFormatter';
+import { daysInMonthIso, formatTime12h } from '@/utils/dateFormatter';
 import type { Internship, TimeRecord, User } from '@/types';
 
 const user = (over: Partial<User> = {}): User => ({
@@ -48,13 +48,24 @@ const internship = (over: Partial<Internship> = {}): Internship => ({
   ...over,
 });
 
-/** A worked day. `notes` defaults to null, which is the common case. */
+/**
+ * A worked day. `notes` defaults to null, which is the common case.
+ *
+ * The four AM/PM columns are all null by default, which is what a row written
+ * before migration v4 looks like to the template — so the default fixture is the
+ * legacy shape, and the tests that care about a real split session say so
+ * explicitly rather than inheriting it.
+ */
 const rec = (date: string, over: Partial<TimeRecord> = {}): TimeRecord => ({
   id: 1,
   internship_id: 1,
   date,
   time_in: '08:00',
   time_out: '17:00',
+  am_time_in: null,
+  am_time_out: null,
+  pm_time_in: null,
+  pm_time_out: null,
   break_minutes: 60,
   total_minutes: 480,
   total_hours: 8,
@@ -62,6 +73,22 @@ const rec = (date: string, over: Partial<TimeRecord> = {}): TimeRecord => ({
   created_at: '',
   ...over,
 });
+
+/**
+ * A post-v4 day: one row carrying a real morning *and* a real afternoon.
+ *
+ * `time_in`/`time_out` stay the day's derived span — 08:00 to 17:00 — which is
+ * exactly what `timeRecordService` writes, so the fixture matches the database
+ * rather than an idealised shape.
+ */
+const splitRec = (over: Partial<TimeRecord> = {}): TimeRecord =>
+  rec('2026-09-01', {
+    am_time_in: '08:00',
+    am_time_out: '12:00',
+    pm_time_in: '13:00',
+    pm_time_out: '17:00',
+    ...over,
+  });
 
 const render = (over: Partial<TmcFormData> = {}): string =>
   buildTmcFormHtml({
@@ -108,17 +135,180 @@ describe('buildDayRows — one row per numbered day', () => {
   it('accepts any day in the month, not only the first', () => {
     expect(buildDayRows('2026-09-17', [rec('2026-09-30')])[29].amIn).toBe('8:00 AM');
   });
+
+  /**
+   * The export screen tells the student "N of M rows filled" before anything is
+   * generated, and `M` comes from `daysInMonthIso`. It once hardcoded 31, so a
+   * September student was told to look for a 31st row the form never printed.
+   *
+   * The screen is a component and this is not, but the number it shows is only
+   * honest if it equals the number of rows the document actually has — so the
+   * two are pinned together here rather than trusted to stay in step.
+   */
+  it('agrees with daysInMonthIso on how many rows each month has', () => {
+    // February 2028 is in here on purpose: 29 rows, and a hardcoded 31 would
+    // have passed a February-2026 case while still being wrong.
+    for (const monthIso of [
+      '2026-01-01',
+      '2026-02-01',
+      '2026-04-01',
+      '2026-09-01',
+      '2026-10-01',
+      '2028-02-01',
+    ]) {
+      expect(daysInMonthIso(monthIso)).toBe(buildDayRows(monthIso, []).length);
+    }
+  });
 });
 
 describe('buildDayRows — the AM/PM rule', () => {
-  it('writes time_in and time_out into all four time cells', () => {
+  /**
+   * The rule this whole feature set exists for.
+   *
+   * Before the four fields existed, the template printed the day's single span
+   * into all four cells, so a morning session and an afternoon session on the
+   * same day were indistinguishable on the signed form. A real record with a
+   * real PM session must reach the PM cells as itself.
+   */
+  it('puts a real afternoon session in the PM cells', () => {
+    const [day] = buildDayRows('2026-09-01', [splitRec()]);
+
+    expect(day.amIn).toBe('8:00 AM');
+    expect(day.amOut).toBe('12:00 PM');
+    expect(day.pmIn).toBe('1:00 PM');
+    expect(day.pmOut).toBe('5:00 PM');
+  });
+
+  it('does not invent an afternoon from the derived span', () => {
+    // `time_in`/`time_out` say 08:00–17:00, which is the day's range and not a
+    // claim that the student worked an unbroken shift. The PM cells must not be
+    // backfilled from them.
+    const [day] = buildDayRows('2026-09-01', [
+      rec('2026-09-01', {
+        am_time_in: '08:00',
+        am_time_out: '12:00',
+        pm_time_in: '13:00',
+        pm_time_out: '14:30',
+        time_in: '08:00',
+        time_out: '14:30',
+      }),
+    ]);
+
+    expect(day.pmOut).toBe('2:30 PM');
+  });
+
+  it('leaves the PM cells blank on a single-shift day', () => {
+    // One session, one pair of cells.
+    //
+    // This used to print the morning's pair into the PM cells as well, on the
+    // theory that the school's form does that for a straight shift. A student
+    // working 08:00–17:00 then read as having worked 08:00–17:00 *and*
+    // 08:00–17:00: eighteen hours on a form whose own TOTAL HRS. column said
+    // 8.00. A supervisor checking a form they are about to sign reads those
+    // cells, not the total, and the row is the first thing they query.
     const [day] = buildDayRows('2026-09-01', [rec('2026-09-01')]);
 
-    // The school's convention for a straight shift: the pair appears in AM
-    // *and* PM rather than two times and two blanks.
-    expect(day.amIn).toBe('8:00 AM');
-    expect(day.amOut).toBe('5:00 PM');
-    expect(day.pmIn).toBe('8:00 AM');
+    expect(day).toMatchObject({
+      amIn: '8:00 AM',
+      amOut: '5:00 PM',
+      pmIn: null,
+      pmOut: null,
+      totalHours: '8.00',
+    });
+  });
+
+  it('prints a morning-only v4 row as one shift, not two', () => {
+    const [day] = buildDayRows('2026-09-01', [
+      rec('2026-09-01', {
+        am_time_in: '07:30',
+        am_time_out: '11:45',
+        time_in: '07:30',
+        time_out: '11:45',
+        total_hours: 4.25,
+      }),
+    ]);
+
+    expect(day).toMatchObject({
+      amIn: '7:30 AM',
+      amOut: '11:45 AM',
+      pmIn: null,
+      pmOut: null,
+    });
+  });
+
+  it('never prints the same session in both halves of a row', () => {
+    // The invariant behind the three tests above, stated directly: a pair of
+    // times in both the AM and PM cells means the form claims two sessions, so
+    // that may only happen on a day that genuinely has two.
+    const singleShiftDays: [string, TimeRecord][] = [
+      ['legacy', rec('2026-09-01')],
+      [
+        'morning only',
+        rec('2026-09-01', { am_time_in: '08:00', am_time_out: '12:00', time_in: '08:00', time_out: '12:00' }),
+      ],
+      [
+        'afternoon only',
+        rec('2026-09-01', {
+          am_time_in: null,
+          am_time_out: null,
+          pm_time_in: '13:00',
+          pm_time_out: '17:00',
+          time_in: '13:00',
+          time_out: '17:00',
+        }),
+      ],
+      [
+        'full split',
+        rec('2026-09-01', {
+          am_time_in: '08:00',
+          am_time_out: '12:00',
+          pm_time_in: '13:00',
+          pm_time_out: '17:00',
+        }),
+      ],
+    ];
+
+    for (const [label, record] of singleShiftDays) {
+      const [day] = buildDayRows('2026-09-01', [record]);
+      const sessions = [
+        [day.amIn, day.amOut],
+        [day.pmIn, day.pmOut],
+      ].filter(([inTime]) => inTime !== null);
+
+      expect(sessions).toHaveLength(label === 'full split' ? 2 : 1);
+    }
+  });
+
+  it('leaves the PM half of a half-typed afternoon alone', () => {
+    // A PM time in with no time out is a mistyped form, not a short shift. It
+    // prints exactly as entered rather than borrowing the morning's out-time and
+    // inventing a session the student did not work.
+    const [day] = buildDayRows('2026-09-01', [
+      rec('2026-09-01', {
+        am_time_in: '08:00',
+        am_time_out: '12:00',
+        pm_time_in: '13:00',
+        pm_time_out: null,
+      }),
+    ]);
+
+    expect(day.pmIn).toBe('1:00 PM');
+    expect(day.pmOut).toBeNull();
+  });
+
+  it('keeps an afternoon-only day in the PM cells', () => {
+    const [day] = buildDayRows('2026-09-01', [
+      rec('2026-09-01', {
+        am_time_in: null,
+        am_time_out: null,
+        pm_time_in: '13:00',
+        pm_time_out: '17:00',
+        time_in: '13:00',
+        time_out: '17:00',
+      }),
+    ]);
+
+    expect(day.pmIn).toBe('1:00 PM');
     expect(day.pmOut).toBe('5:00 PM');
   });
 
@@ -137,6 +327,41 @@ describe('buildDayRows — the AM/PM rule', () => {
     });
   });
 
+  it('never mixes one session time-in with the other time-out', () => {
+    // The failure this guards is a cell-by-cell merge: the earliest record
+    // supplying `amIn` and the latest supplying `pmOut`, which would print a
+    // session nobody worked.
+    const rows = buildDayRows('2026-09-01', [
+      rec('2026-09-01', {
+        id: 1,
+        time_in: '08:00',
+        time_out: '12:00',
+        am_time_in: '08:00',
+        am_time_out: '12:00',
+        pm_time_in: null,
+        pm_time_out: null,
+        total_hours: 4,
+      }),
+      rec('2026-09-01', {
+        id: 2,
+        time_in: '13:00',
+        time_out: '17:00',
+        am_time_in: null,
+        am_time_out: null,
+        pm_time_in: '13:00',
+        pm_time_out: '17:00',
+        total_hours: 4,
+      }),
+    ]);
+
+    expect(rows[0]).toMatchObject({
+      amIn: '8:00 AM',
+      amOut: '12:00 PM',
+      pmIn: '1:00 PM',
+      pmOut: '5:00 PM',
+    });
+  });
+
   it('sums a split day rather than reporting one half of it', () => {
     const rows = buildDayRows('2026-09-01', [
       rec('2026-09-01', { time_in: '08:00', time_out: '12:00', total_hours: 4 }),
@@ -144,6 +369,15 @@ describe('buildDayRows — the AM/PM rule', () => {
     ]);
 
     expect(rows[0].totalHours).toBe('8.00');
+  });
+
+  it('totals a single record’s two sessions once, not twice', () => {
+    // The total is the record's own `total_hours`, never a sum over the printed
+    // cells. Those two are the same number here only because the cells no longer
+    // repeat a session — see the straight-shift history above.
+    const [day] = buildDayRows('2026-09-01', [splitRec({ total_hours: 8 })]);
+
+    expect(day.totalHours).toBe('8.00');
   });
 
   it('sums after rounding each record, so float error cannot leak in', () => {
@@ -164,11 +398,42 @@ describe('buildDayRows — the AM/PM rule', () => {
   });
 
   it('converts through the shared 12-hour formatter', () => {
+    // A legacy row, so the span is doing the work — and the span starts at
+    // 1:05 PM, so the PM cells are where it belongs. The point of the assertion
+    // is the conversion, not the half; the half is what the tests above pin.
     const [day] = buildDayRows('2026-09-01', [
       rec('2026-09-01', { time_in: '13:05', time_out: '22:45' }),
     ]);
-    expect(day.amIn).toBe(formatTime12h('13:05'));
-    expect(day.amOut).toBe(formatTime12h('22:45'));
+    expect(day.pmIn).toBe(formatTime12h('13:05'));
+    expect(day.pmOut).toBe(formatTime12h('22:45'));
+    expect(day.amIn).toBeNull();
+  });
+
+  it('puts a legacy afternoon-only day in the PM cells, not under an AM heading', () => {
+    // A pre-v4 row has no half of its own, only a span. When that span starts in
+    // the afternoon the form used to print "1:00 PM – 5:00 PM" in the two cells
+    // headed AM, which is a nine-hour morning on a form a supervisor signs.
+    const [day] = buildDayRows('2026-09-01', [
+      rec('2026-09-01', { time_in: '13:00', time_out: '17:00' }),
+    ]);
+
+    expect(day).toMatchObject({
+      amIn: null,
+      amOut: null,
+      pmIn: '1:00 PM',
+      pmOut: '5:00 PM',
+    });
+  });
+
+  it('treats a legacy noon start as an afternoon', () => {
+    // 12:00 is where the form's AM block ends and its PM block begins, so a row
+    // starting there is not a morning that ran long.
+    const [day] = buildDayRows('2026-09-01', [
+      rec('2026-09-01', { time_in: '12:00', time_out: '17:00' }),
+    ]);
+
+    expect(day.amIn).toBeNull();
+    expect(day.pmIn).toBe('12:00 PM');
   });
 });
 

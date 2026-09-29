@@ -1,7 +1,8 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -12,16 +13,17 @@ import { Link, router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useApp } from '@/hooks/useApp';
 import { useTheme } from '@/hooks/useTheme';
-import { BottomSheet } from '@/components/BottomSheet';
 import { Button } from '@/components/FormField';
 import { EmptyState } from '@/components/EmptyState';
 import { ListRow } from '@/components/ListRow';
 import { ScreenHeader } from '@/components/ScreenHeader';
 import { getDatabase } from '@/database/database';
 import * as pdfService from '@/services/pdfService';
+import * as timeRecordService from '@/services/timeRecordService';
 import { formatHours } from '@/utils/progressCalculator';
+import { minutesToHours } from '@/utils/timeCalculator';
 import { courseBlock } from '@/utils/tmcFormTemplate';
-import { monthLabel, shiftMonthIso, startOfMonthIso, todayIso } from '@/utils/dateFormatter';
+import { monthLabel, daysInMonthIso, shiftMonthIso, startOfMonthIso, todayIso } from '@/utils/dateFormatter';
 import {
   contentWidth,
   fontSize,
@@ -30,10 +32,9 @@ import {
   scaledLine,
   spacing,
   HIT_SIZE,
-  NUMERIC,
 } from '@/constants/theme';
 
-type Action = 'generate' | 'print' | 'share';
+type Action = 'generate' | 'print' | 'share' | 'save';
 
 /**
  * Two documents, two audiences.
@@ -46,6 +47,55 @@ type Action = 'generate' | 'print' | 'share';
  */
 type Format = 'tmc' | 'detail';
 
+/**
+ * What the selected month actually holds, so the screen never guesses at it.
+ *
+ * Tagged with the month it describes. The read is asynchronous and the student
+ * can step the arrow while it is in flight, and a bare `{ dayCount, hours }` would
+ * show September's numbers under October's heading in between. Keying it means
+ * the render can simply ignore anything that is not the month on screen, with no
+ * effect needed to clear the stale value first.
+ */
+interface MonthStats {
+  month: string;
+  /**
+   * `null` when the read has not landed or failed; `0` is a real, checked
+   * answer — the difference between "unknown" and "nothing there", and the whole
+   * empty-month warning rests on not conflating them.
+   */
+  dayCount: number | null;
+  hours: number;
+}
+
+/**
+ * The months that hold records, as `YYYY-MM` strings.
+ *
+ * Kept as raw strings rather than `MonthSummary`s because the only thing the
+ * screen needs from them is a set of reachable months — for the stepper's bounds
+ * and for the "your records are over there" warning.
+ */
+type MonthList = string[];
+
+/**
+ * How many months to name before collapsing the rest.
+ *
+ * A student back-filling a whole year has twelve months of records and no reason
+ * to read a paragraph listing them. Three is enough to recognise "they are all
+ * in autumn" without turning the warning into a table.
+ */
+const NAMED_MONTHS = 3;
+
+/** `September 2026, October 2026 and November 2026` — or three plus a count. */
+const describeMonths = (months: MonthList): string => {
+  const named = months.slice(-NAMED_MONTHS).map((m) => monthLabel(`${m}-01`));
+  const extra = months.length - named.length;
+  const list =
+    named.length === 1
+      ? named[0]
+      : `${named.slice(0, -1).join(', ')} and ${named[named.length - 1]}`;
+  return extra > 0 ? `${list}, plus ${extra} more` : list;
+};
+
 export default function PrintRecordsScreen() {
   const { user, internship, summary } = useApp();
   const { colors: c, elevation } = useTheme();
@@ -53,9 +103,9 @@ export default function PrintRecordsScreen() {
 
   const [format, setFormat] = useState<Format>('tmc');
   const [busy, setBusy] = useState<Action | null>(null);
-  const [uri, setUri] = useState<string | null>(null);
-  const [pages, setPages] = useState<number | null>(null);
-  const [sheetOpen, setSheetOpen] = useState(false);
+  const [result, setResult] = useState<pdfService.GeneratedRecord | null>(null);
+  const [monthStats, setMonthStats] = useState<MonthStats | null>(null);
+  const [monthsWithRecords, setMonthsWithRecords] = useState<MonthList>([]);
 
   /**
    * The month the TMC sheet covers, as a first-of-month key.
@@ -65,14 +115,28 @@ export default function PrintRecordsScreen() {
    * and no days left to log is a blank form; if the placement was set up with an
    * end date already in the past, the clamp falls back to the start month so the
    * stepper is never left with `min > max` and both arrows permanently dead.
+   *
+   * **Widened by the months that actually hold records.** A month with records
+   * is always reachable, because the whole point of the empty-month warning is
+   * to offer a jump into it — and a jump the clamp would immediately undo would
+   * leave the student pressing the same dead month twice.
    */
   const bounds = useMemo(() => {
     if (!internship) return null;
-    const first = startOfMonthIso(internship.start_date);
+    const placementFirst = startOfMonthIso(internship.start_date);
     const now = startOfMonthIso(todayIso());
-    const last = now < first ? first : now;
-    return { first, last };
-  }, [internship]);
+    const placementLast = now < placementFirst ? placementFirst : now;
+
+    if (monthsWithRecords.length === 0) return { first: placementFirst, last: placementLast };
+
+    // `YYYY-MM` sorts lexicographically, so the extremes are the min and max.
+    return {
+      first: monthsWithRecords[0] < placementFirst ? monthsWithRecords[0] : placementFirst,
+      last: monthsWithRecords[monthsWithRecords.length - 1] > placementLast
+        ? monthsWithRecords[monthsWithRecords.length - 1]
+        : placementLast,
+    };
+  }, [internship, monthsWithRecords]);
 
   const [monthIso, setMonthIso] = useState<string | null>(null);
 
@@ -87,83 +151,237 @@ export default function PrintRecordsScreen() {
   const atFirstMonth = month !== null && bounds !== null && month <= bounds.first;
   const atLastMonth = month !== null && bounds !== null && month >= bounds.last;
 
+  /**
+   * The selected month's real figures.
+   *
+   * Fetched rather than filtered from `summary`, because `summary.completed` is
+   * the *whole placement*: showing it under "Hours logged in that month" told a
+   * student with 40 days in May that May held all 40 of them, which was simply
+   * false and was half of why a blank September sheet looked correct.
+   * → [[PDF Export#The blank form bug]]
+   */
+  useEffect(() => {
+    if (!internship || format !== 'tmc' || !month) return;
+
+    let cancelled = false;
+
+    void Promise.all([
+      timeRecordService.getMonthAttendance(internship.id, month),
+      timeRecordService.listMonthsWithRecords(internship.id),
+    ])
+      .then(([attendance, months]) => {
+        if (cancelled) return;
+        setMonthStats({ month, dayCount: attendance.day_count, hours: attendance.total_hours });
+        setMonthsWithRecords(months.map((m) => m.month));
+      })
+      // A failed stats read is not worth interrupting an export over. It leaves
+      // the count unknown rather than zero, so a month whose read failed is never
+      // mistaken for an empty one, and `generateTmcFormPdf` still throws its own
+      // error if the month really has nothing in it.
+      .catch(() => {
+        if (!cancelled) setMonthStats({ month, dayCount: null, hours: 0 });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [internship, format, month]);
+
+  /**
+   * The stats for the month currently on screen, or null while they are unread.
+   *
+   * Derived rather than stored-and-cleared: a record tagged with another month is
+   * stale by definition, and discarding it in the effect body would be a
+   * synchronous `setState` and a second render pass on every arrow press.
+   */
+  const stats = monthStats && monthStats.month === month ? monthStats : null;
+
+  /**
+   * The month to jump to when the selected one holds nothing.
+   *
+   * The nearest one to the current selection rather than simply the last: a
+   * student who has stepped back from September to August wants August's nearest
+   * populated neighbour, not a jump forward past the month they were looking at.
+   */
+  const nearestMonthWithRecords = useMemo(() => {
+    if (!month || monthsWithRecords.length === 0) return null;
+    const before = monthsWithRecords.filter((m) => m < month).pop();
+    const after = monthsWithRecords.find((m) => m > month);
+    return before ?? after ?? monthsWithRecords[monthsWithRecords.length - 1];
+  }, [month, monthsWithRecords]);
+
+  /** True when this sheet would print blank and the placement is not empty. */
+  const emptyMonthWarning = useMemo(() => {
+    if (format !== 'tmc' || !month || !stats || stats.dayCount === null) return false;
+    return stats.dayCount === 0 && monthsWithRecords.length > 0;
+  }, [format, month, stats, monthsWithRecords]);
+
+  const reset = useCallback(() => {
+    setResult(null);
+  }, []);
+
   const stepMonth = useCallback(
     (delta: number) => {
       if (!month) return;
       const next = shiftMonthIso(month, delta);
       if (bounds && (next < bounds.first || next > bounds.last)) return;
       setMonthIso(next);
-      setUri(null);
-      setPages(null);
+      reset();
     },
-    [month, bounds],
+    [month, bounds, reset],
   );
 
   /**
    * Changing format or month invalidates the file already on disk.
    *
-   * The `uri` is a path to a rendered document describing a specific month. Left
-   * in place, a student who switched from the TMC sheet to the detailed log
-   * would press Share and send September's school form while the screen reads
+   * The result is a rendered document describing a specific month. Left in
+   * place, a student who switched from the TMC sheet to the detailed log would
+   * press Share and send September's school form while the screen reads
    * "Detailed Log" — the cache makes it look like it worked.
    */
-  const chooseFormat = useCallback((next: Format) => {
-    setFormat(next);
-    setUri(null);
-    setPages(null);
-  }, []);
+  const chooseFormat = useCallback(
+    (next: Format) => {
+      setFormat(next);
+      reset();
+    },
+    [reset],
+  );
 
-  const generate = useCallback(async () => {
+  const fileName = useMemo(
+    () => (format === 'tmc' && month ? pdfService.tmcFileName(month) : pdfService.logFileName()),
+    [format, month],
+  );
+
+  const documentTitle = useMemo(
+    () => (format === 'tmc' && month ? `OJT Daily Time Record — ${monthLabel(month)}` : 'OJT Time Record'),
+    [format, month],
+  );
+
+  /**
+   * Render the document, or return the one already rendered.
+   *
+   * Shared by all three outputs so Save, Share and Print cannot disagree about
+   * which file is on screen. Returns `null` on failure, having already told the
+   * user why.
+   */
+  const ensureGenerated = useCallback(async (): Promise<pdfService.GeneratedRecord | null> => {
     if (!user || !internship) return null;
     // The detailed log covers the whole placement, so it has no month. Only the
     // TMC sheet is month-scoped, and it is never generated without one.
     if (format === 'tmc' && !month) return null;
+    if (result) return result;
 
     setBusy('generate');
-    setUri(null);
     try {
       const db = await getDatabase();
-      const result =
+      const generated =
         format === 'tmc'
           ? await pdfService.generateTmcFormPdf(db, user, internship, month as string)
           : await pdfService.generateOjtRecordPdf(db, user, internship);
-      setUri(result.uri);
-      setPages(result.numberOfPages);
-      return result;
+      setResult(generated);
+      return generated;
     } catch (error) {
-      Alert.alert(
-        'Could not create the PDF',
-        error instanceof Error ? error.message : 'Unknown error.',
-      );
+      /**
+       * The backstop behind the inline warning.
+       *
+       * `TmcMonthEmptyError` is not a generic failure: it knows which months do
+       * hold records, so the response is a jump to one of them rather than
+       * "check for duplicate days". Anything else is a real error.
+       */
+      if (error instanceof pdfService.TmcMonthEmptyError) {
+        // The same month the inline warning would have offered, so both paths
+        // land the student in the same place.
+        const target = nearestMonthWithRecords;
+        Alert.alert(
+          `Nothing logged in ${month ? monthLabel(month) : 'that month'}`,
+          target
+            ? `${error.message} Open ${monthLabel(`${target}-01`)} instead?`
+            : error.message,
+          target
+            ? [
+                { text: 'Cancel', style: 'cancel' },
+                {
+                  text: `Open ${monthLabel(`${target}-01`)}`,
+                  onPress: () => {
+                    setMonthIso(target);
+                    reset();
+                  },
+                },
+              ]
+            : [{ text: 'OK' }],
+        );
+      } else {
+        Alert.alert(
+          'Could not create the PDF',
+          error instanceof Error ? error.message : 'Unknown error.',
+        );
+      }
       return null;
     } finally {
       setBusy(null);
     }
-  }, [user, internship, format, month]);
+  }, [user, internship, format, month, result, reset, nearestMonthWithRecords]);
 
-  const shareTitle = format === 'tmc' && month ? `OJT Daily Time Record — ${monthLabel(month)}` : 'Share OJT Time Record';
+  /**
+   * Keep a real file the student can find again.
+   *
+   * The old screen had one "Share / Save" button, which opened the system share
+   * sheet and hoped the student found "Save to Files" inside it — and on Android
+   * the sheet's own destinations are chosen by the *receiver*, so a destination
+   * with no save option silently offered nothing at all. Save is now its own
+   * action, and it is deliberately not the same action on both platforms: iOS
+   * writes into `Documents/`, which the Files app browses, while Android has to
+   * ask which folder, because its document directory is app-private and a file
+   * saved there is one the student can never find again.
+   * → [[PDF Export#Where the file goes]]
+   */
+  const onSave = useCallback(async () => {
+    const generated = await ensureGenerated();
+    if (!generated) return;
 
-  const onShare = useCallback(async () => {
-    // Reuse an already-generated file; only build one if the screen was opened
-    // straight into sharing.
-    const target = uri ?? (await generate())?.uri;
-    if (!target) return;
-
-    setBusy('share');
+    setBusy('save');
     try {
-      await pdfService.shareRecord(target, shareTitle);
+      const outcome = await pdfService.savePdf(generated.uri, fileName);
+
+      if (outcome.status === 'cancelled') return;
+
+      const { name, location } = outcome.file;
+      Alert.alert(
+        'Saved',
+        `${name}\n\n${location}.\n\nUse Share if you want to send it to someone.`,
+      );
     } catch (error) {
       Alert.alert(
-        'Sharing unavailable',
-        error instanceof Error
-          ? error.message
-          : 'Use "Save to Files" from the share sheet instead.',
+        'Could not save the file',
+        error instanceof Error ? error.message : 'Unknown error.',
       );
     } finally {
       setBusy(null);
     }
-  }, [uri, generate, shareTitle]);
+  }, [ensureGenerated, fileName]);
 
+  const onShare = useCallback(async () => {
+    const generated = await ensureGenerated();
+    if (!generated) return;
+
+    setBusy('share');
+    try {
+      await pdfService.shareRecord(generated.uri, documentTitle);
+    } catch (error) {
+      Alert.alert(
+        'Sharing unavailable',
+        error instanceof Error ? error.message : 'Use "Save File" instead.',
+      );
+    } finally {
+      setBusy(null);
+    }
+  }, [ensureGenerated, documentTitle]);
+
+  /**
+   * Print goes through the service rather than through the generated file, so it
+   * re-reads the database at the moment of printing. That is what lets a student
+   * log another day, come back and press Print without first pressing Create.
+   */
   const onPrint = useCallback(async () => {
     if (!user || !internship) return;
     if (format === 'tmc' && !month) return;
@@ -177,10 +395,14 @@ export default function PrintRecordsScreen() {
         await pdfService.printRecord(db, user, internship);
       }
     } catch (error) {
-      Alert.alert(
-        'Printing failed',
-        error instanceof Error ? error.message : 'Unknown error.',
-      );
+      if (error instanceof pdfService.TmcMonthEmptyError) {
+        Alert.alert('Nothing to print', error.message);
+      } else {
+        Alert.alert(
+          'Printing failed',
+          error instanceof Error ? error.message : 'Unknown error.',
+        );
+      }
     } finally {
       setBusy(null);
     }
@@ -338,12 +560,34 @@ export default function PrintRecordsScreen() {
               <ListRow
                 icon="document-text-outline"
                 label="Sheet covers"
-                value={month ? `${monthLabel(month)} · 31 dated rows` : '—'}
+                value={
+                  month
+                    ? `${monthLabel(month)} · ${daysInMonthIso(month)} dated rows`
+                    : '—'
+                }
               />
+              {/**
+                How many of those rows will carry attendance.
+                *
+                This is the screen's answer to "why is my sheet blank?", shown
+                * before anything is generated rather than inferred afterwards from
+                * a file that looks the same either way.
+                *
+                * The denominator is the month's real length, not a hardcoded 31.
+                * `buildDayRows` emits one row per real day, so a September sheet has
+                * 30 of them — telling the student 31 here would have them hunting
+                * for a 31st row that was never printed.
+                */}
               <ListRow
                 icon="checkmark-circle-outline"
-                label="Hours logged in that month"
-                value={formatHours(summary.completed)}
+                label="Rows with attendance"
+                value={
+                  !month || !stats || stats.dayCount === null
+                    ? 'Checking…'
+                    : `${stats.dayCount} of ${daysInMonthIso(month)}${
+                        stats.dayCount > 0 ? ` · ${formatHours(stats.hours)} hrs` : ''
+                      }`
+                }
               />
               <ListRow icon="trending-up-outline" label="Progress to date" value={`${summary.percent}%`} />
             </>
@@ -373,7 +617,38 @@ export default function PrintRecordsScreen() {
           )}
         </View>
 
-        {uri ? (
+        {/**
+          Said before the button is pressed, not after.
+          *
+          The original bug was not that a wrong file was produced — it was that
+          nothing distinguished a blank sheet from a correct one. A blank TMC form
+          has the same letterhead, the same 31 numbered rows and the same signature
+          lines as a filled one, so a student could not tell by looking, and neither
+          could their supervisor. `pdfService` refuses to generate it at all; this
+          is what stops them reaching for the button, and offers the way out.
+          */}
+        {emptyMonthWarning && month && nearestMonthWithRecords ? (
+          <View style={[styles.warnCard, elevation.sm]}>
+            <View style={styles.warnHeader}>
+              <Ionicons name="alert-circle" size={18} color={c.warning} />
+              <Text style={styles.warnTitle}>Nothing logged in {monthLabel(month)}</Text>
+            </View>
+            <Text style={styles.warnBody}>
+              This sheet would print blank. Your records are in {describeMonths(monthsWithRecords)}.
+            </Text>
+            <Button
+              label={`Go to ${monthLabel(`${nearestMonthWithRecords}-01`)}`}
+              onPress={() => {
+                setMonthIso(nearestMonthWithRecords);
+                reset();
+              }}
+              variant="secondary"
+              fullWidth
+            />
+          </View>
+        ) : null}
+
+        {result ? (
           <View style={[styles.readyCard, elevation.sm]}>
             <View style={styles.readyHeader}>
               <Ionicons name="checkmark-circle" size={18} color={c.success} />
@@ -383,18 +658,28 @@ export default function PrintRecordsScreen() {
               <ActivityIndicator color={c.primary} />
             ) : (
               <Text style={styles.ready}>
-                {pages ?? 1} {pages === 1 ? 'page' : 'pages'} generated.{'\n'}
-                Share it and choose Save to Files to keep a copy - files in the app cache
-                are cleared by Android when storage runs low.
+                {documentTitle}.{'\n'}
+                {result.numberOfPages} {result.numberOfPages === 1 ? 'page' : 'pages'} ·{' '}
+                {result.recordCount} {result.recordCount === 1 ? 'day' : 'days'} ·{' '}
+                {formatHours(minutesToHours(result.totalMinutes))} hrs.{'\n'}
+                Save File keeps a named copy on this device; Share sends it on.
               </Text>
             )}
           </View>
         ) : null}
 
+        {/**
+          Four actions rather than three, because a device has three genuinely
+          different ways out of this screen and one of them was previously
+          unreachable: Save was a line inside a share sheet, which on Android is
+          a list of *receivers*, so a destination with no "save" affordance
+          offered none at all. Generate is kept separate from the rest because it
+          is the only one that tells the student something is wrong.
+        */}
         <View style={styles.actions}>
           <Button
             label={format === 'tmc' ? 'Create TMC Form' : 'Create Detailed Log'}
-            onPress={generate}
+            onPress={ensureGenerated}
             loading={busy === 'generate'}
             disabled={busy !== null && busy !== 'generate'}
             fullWidth
@@ -405,12 +690,26 @@ export default function PrintRecordsScreen() {
             }
           />
           <Button
-            label="Share / Save"
-            onPress={() => setSheetOpen(true)}
+            label="Save File"
+            onPress={onSave}
             variant="secondary"
-            disabled={busy !== null}
+            loading={busy === 'save'}
+            disabled={busy !== null && busy !== 'save'}
             fullWidth
-            accessibilityHint="Opens the file and the options for sending it"
+            accessibilityHint={
+              Platform.OS === 'android'
+                ? 'Asks which folder to keep a named copy of the PDF in'
+                : 'Keeps a named copy of the PDF in the Files app'
+            }
+          />
+          <Button
+            label="Share"
+            onPress={onShare}
+            variant="secondary"
+            loading={busy === 'share'}
+            disabled={busy !== null && busy !== 'share'}
+            fullWidth
+            accessibilityHint="Opens the system share sheet to send the PDF"
           />
           <Button
             label="Print"
@@ -419,56 +718,10 @@ export default function PrintRecordsScreen() {
             loading={busy === 'print'}
             disabled={busy !== null && busy !== 'print'}
             fullWidth
+            accessibilityHint="Opens the system print dialog, including wireless printers"
           />
         </View>
       </ScrollView>
-
-      {/*
-        The system share sheet that `expo-sharing` opens covers the *destinations*.
-        What it cannot show is the file itself, and this is the one screen where
-        that matters: a student is about to hand these hours to a supervisor for
-        sign-off, and should be able to confirm what they are sending first. So
-        the sheet is the file row, and the system takes over from there.
-      */}
-      <BottomSheet visible={sheetOpen} onClose={() => setSheetOpen(false)} title="Send your record">
-        <View style={styles.sheetFile}>
-          <View style={styles.sheetIcon}>
-            <Ionicons name="document-text" size={20} color={c.primaryOnSoft} />
-          </View>
-          <View style={styles.sheetText}>
-            <Text style={styles.sheetName}>
-              {format === 'tmc' && month ? `TMC Daily Time Record — ${monthLabel(month)}` : 'OJT Detailed Log'}
-            </Text>
-            <Text style={styles.sheetMeta}>
-              {uri
-                ? `PDF · ${pages ?? 1} ${pages === 1 ? 'page' : 'pages'} · ${formatHours(summary.completed)} hrs logged to date`
-                : 'Not generated yet — it will be created when you send'}
-            </Text>
-          </View>
-        </View>
-
-        <View style={styles.sheetActions}>
-          <Button
-            label="Share / Save to Files"
-            onPress={onShare}
-            loading={busy === 'share'}
-            fullWidth
-            accessibilityHint="Opens the system share sheet"
-          />
-          <Button
-            label="Print"
-            onPress={onPrint}
-            variant="secondary"
-            loading={busy === 'print'}
-            fullWidth
-          />
-        </View>
-
-        <Text style={styles.sheetNote}>
-          Files in the app cache are cleared by Android when storage runs low. Choose Save to
-          Files to keep a copy.
-        </Text>
-      </BottomSheet>
     </View>
   );
 }
@@ -584,44 +837,40 @@ const createStyles = (c: ReturnType<typeof useTheme>['colors']) =>
       lineHeight: scaledLine(fontSize.sm, 1.5),
     },
 
-    actions: { gap: spacing.md },
-
-    sheetFile: {
+    /**
+     * A caution, not an error.
+     *
+     * The student can legitimately want to print a blank sheet — a month they
+     * have not worked yet — so this is `warning`, and it never blocks the button.
+     * It exists because the placement holds records and *this* month does not,
+     * which is the one case where the sheet would be handed in looking valid and
+     * carrying nothing.
+     */
+    warnCard: {
+      backgroundColor: c.warningSoft,
+      borderRadius: radius.lg,
+      borderWidth: StyleSheet.hairlineWidth,
+      borderColor: c.warning,
+      padding: spacing.lg,
+      gap: spacing.sm,
+    },
+    warnHeader: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: spacing.md,
-      backgroundColor: c.primarySoft,
-      borderRadius: radius.md,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: c.primaryOutline,
-      padding: spacing.md,
-      marginBottom: spacing.lg,
+      gap: spacing.xs,
     },
-    sheetIcon: {
-      width: 40,
-      height: 40,
-      borderRadius: radius.md,
-      alignItems: 'center',
-      justifyContent: 'center',
-      backgroundColor: c.surface,
-    },
-    sheetText: { flex: 1, gap: 2 },
-    sheetName: {
+    warnTitle: {
       fontSize: fontSize.md,
-      fontWeight: fontWeight.semibold,
-      color: c.primaryOnSoft,
+      fontWeight: fontWeight.bold,
+      color: c.warning,
+      flex: 1,
     },
-    sheetMeta: {
-      ...NUMERIC,
-      fontSize: fontSize.xs,
-      color: c.primaryOnSoft,
-      opacity: 0.9,
+    warnBody: {
+      fontSize: fontSize.sm,
+      color: c.text,
+      lineHeight: scaledLine(fontSize.sm, 1.5),
+      marginBottom: spacing.xs,
     },
-    sheetActions: { gap: spacing.md },
-    sheetNote: {
-      fontSize: fontSize.xs,
-      color: c.textMuted,
-      lineHeight: scaledLine(fontSize.xs, 1.5),
-      marginTop: spacing.md,
-    },
+
+    actions: { gap: spacing.md },
   });

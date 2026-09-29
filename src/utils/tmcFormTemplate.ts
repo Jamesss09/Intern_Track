@@ -42,7 +42,14 @@ const HEADER_FILL = '#D9D9D9';
 export interface TmcFormData {
   user: User;
   internship: Internship;
-  /** Every record in the month being printed, in any order. */
+  /**
+   * Every record in the month being printed, in any order.
+   *
+   * Fetched by `queries.listMonthRecords` with inclusive bounds, so this is the
+   * attendance that exists — not a filtered or re-derived subset. An empty array
+   * is a legitimate input: a month with nothing logged prints as a blank sheet,
+   * which is what a form is for.
+   */
   records: TimeRecord[];
   /** Any day inside the target month. Rows are numbered 1 to the month's length. */
   monthIso: string;
@@ -68,26 +75,130 @@ export interface TmcDayRow {
   experience: string | null;
 }
 
+/** One record's four cells, already resolved to 12-hour display strings. */
+interface SessionCells {
+  amIn: string | null;
+  amOut: string | null;
+  pmIn: string | null;
+  pmOut: string | null;
+}
+
+/**
+ * A record's four time cells, straight from the columns it was saved with.
+ *
+ * No cross-half borrowing happens here. Every decision about where a time is
+ * allowed to appear belongs to the half that actually contains it, and the only
+ * place that can see how many sessions the day really has is `buildDayRows`.
+ */
+const ownCells = (record: TimeRecord): SessionCells => {
+  const show = (t: string | null): string | null => (t ? formatTime12h(t) : null);
+  return {
+    amIn: show(record.am_time_in),
+    amOut: show(record.am_time_out),
+    pmIn: show(record.pm_time_in),
+    pmOut: show(record.pm_time_out),
+  };
+};
+
+/**
+ * A row written before migration v4, with none of the four columns filled.
+ *
+ * `time_in`/`time_out` are that row's only record of what was worked, so they
+ * stand in for its morning. A row the v4 backfill already reached is *not* in
+ * this category — the backfill copies the same two values into the AM columns —
+ * but it arrives at the same place either way, which is the point: both pre-v4
+ * shapes print as a morning, never as two.
+ */
+const isLegacyRow = (record: TimeRecord): boolean =>
+  record.am_time_in === null &&
+  record.am_time_out === null &&
+  record.pm_time_in === null &&
+  record.pm_time_out === null;
+
+/** One half of the printed row: a time in, a time out, or neither. */
+interface HalfCells {
+  in: string | null;
+  out: string | null;
+}
+
+/**
+ * Which half of the row a legacy row's single span belongs in.
+ *
+ * A pre-v4 row carries no half information at all — only the day's start and
+ * end — so its own clock values have to decide. A shift starting at or after
+ * noon is an afternoon one, and printing it in the AM cells puts "1:00 PM"
+ * underneath a heading that says AM. `12:00` counts as afternoon, because that
+ * is where the form's AM block ends and its PM block begins.
+ *
+ * `null` for a row that is not legacy: it already knows its own halves, and
+ * guessing them would override real data.
+ */
+const legacyHalf = (record: TimeRecord): 'am' | 'pm' | null => {
+  if (!isLegacyRow(record)) return null;
+
+  const hour = Number.parseInt(record.time_in.slice(0, 2), 10);
+  if (Number.isNaN(hour)) return 'am';
+  return hour >= 12 ? 'pm' : 'am';
+};
+
+/**
+ * A record's cells for one half.
+ *
+ * `substitute` decides whether a legacy row's day span may stand in for the
+ * cells it does not have. It is the whole of the migration story:
+ *
+ *  - **true** in the half `legacyHalf` picks, which is the only place a pre-v4
+ *    row's attendance can honestly go. A month of legacy days must print rather
+ *    than come out blank, and each of those days prints as one shift.
+ *  - **true** in the PM half **on a split day**, where a second record really is
+ *    a second session and its span is that session.
+ *  - **false** otherwise. An afternoon-only shift has no morning, and borrowing
+ *    the span would print "1:00 PM – 5:00 PM" in the AM cells — a nine-hour
+ *    morning nobody worked. A single-session day has no afternoon, and repeating
+ *    the morning across both halves made one nine-hour shift read as two, which
+ *    contradicts the row's own `TOTAL HRS.` and is the first thing a supervisor
+ *    would query on a form they are being asked to sign.
+ *
+ * Either way the pair is kept together: a time in with no time out is a mistyped
+ * form, not a short shift, so a half-recorded afternoon prints exactly as
+ * entered rather than borrowing the morning's out-time.
+ */
+const halfOf = (record: TimeRecord, half: 'am' | 'pm', substitute: boolean): HalfCells => {
+  const cells = ownCells(record);
+  const own: HalfCells =
+    half === 'am'
+      ? { in: cells.amIn, out: cells.amOut }
+      : { in: cells.pmIn, out: cells.pmOut };
+
+  if (own.in !== null || own.out !== null) return own;
+  if (!substitute || !isLegacyRow(record)) return own;
+
+  return {
+    in: record.time_in ? formatTime12h(record.time_in) : null,
+    out: record.time_out ? formatTime12h(record.time_out) : null,
+  };
+};
+
 /**
  * Roll a month's records up into 1..N printed rows.
  *
- * **The AM/PM rule.** The form gives a day four time cells but the app stores
- * one `time_in`/`time_out` pair per record, so a pair has to be written into
- * both halves: AM in/out *and* PM in/out each get `time_in`/`time_out`. That is
- * what the school asks for — a straight shift is entered twice, once in each
- * box — and it is why a single-record day prints four identical times rather
- * than two times and two blanks.
+ * **The AM/PM rule.** Each record carries its own four times, so a morning
+ * session and an afternoon session on the same day are separate, real data and
+ * land in their own cells. Two cases, one per day:
  *
- * The schema already permits two records on one date (the unique index is on
- * `(internship_id, date, time_in)`), so a split day is not hypothetical. When
- * it happens the earliest record fills AM and the latest fills PM, which
- * degrades to exactly the single-record behaviour above for the common case and
- * loses nothing for the split one.
+ *  - **One record** — the normal case after migration v4. Its AM times go to the
+ *    AM cells and its PM times to the PM cells, with the straight-shift
+ *    convention covering a day that only has a morning. A split shift is the
+ *    first thing this code has ever been able to represent honestly.
+ *  - **Two records on one date** — a split day still permitted by the unique
+ *    index on `(internship_id, date, time_in)`. The earliest record fills AM and
+ *    the latest fills PM. `sorted[0]` and `sorted[last]` are the same element
+ *    when there is one record, so this degrades to the case above for free.
  *
- * `total_hours` is summed, not taken from one row, because it is the day's
- * hours and a split day has two contributions. It is summed **after**
- * rounding each row to 2dp, matching what the student sees on the record card,
- * so the printed number cannot drift from the on-screen one by float error.
+ * `total_hours` is summed, not taken from one row, because it is the day's hours
+ * and a split day has two contributions. It is summed **after** rounding each row
+ * to 2dp, matching what the student sees on the record card, so the printed
+ * number cannot drift from the on-screen one by float error.
  */
 export const buildDayRows = (monthIso: string, records: TimeRecord[]): TmcDayRow[] => {
   const target = parseIsoDate(monthIso);
@@ -101,7 +212,7 @@ export const buildDayRows = (monthIso: string, records: TimeRecord[]): TmcDayRow
     /*
      * Keyed on the whole month, not just the day of the month.
      *
-     * `generateTmcFormPdf` pre-filters with `filterTimeRecords`, so in practice
+     * `generateTmcFormPdf` pre-filters with `listMonthRecords`, so in practice
      * nothing out of range ever arrives. But this function is exported, and
      * keying on the day alone means a stray 1 October record would land on
      * 1 September — a silently wrong cell on a document a supervisor signs,
@@ -131,24 +242,48 @@ export const buildDayRows = (monthIso: string, records: TimeRecord[]): TmcDayRow
     const first = sorted[0];
     const last = sorted[sorted.length - 1];
 
-    const hours = round2(
-      sorted.reduce((sum, r) => sum + round2(r.total_hours), 0),
-    );
+    // A legacy row's span goes in the half its own clock points at, so a
+    // pre-v4 afternoon does not print under an AM heading.
+    const morning = halfOf(first, 'am', legacyHalf(first) === 'am');
+
+    /**
+     * The afternoon, from the latest record on the day.
+     *
+     * On a **split day** — two records for one date, still permitted by the
+     * unique index on `(internship_id, date, time_in)` — the second record is a
+     * second session, so it is printed in the PM half and its span may stand in.
+     *
+     * On a **single-record day** only that record's own PM columns are used, so a
+     * day with no afternoon prints as two blank cells rather than a second copy
+     * of the morning.
+     */
+    const afternoon = halfOf(last, 'pm', sorted.length > 1 || legacyHalf(last) === 'pm');
+
+    // Only the morning session's note describes the day. A second note is
+    // still shown rather than dropped — concatenating would run the two
+    // together into a sentence that was never written.
+    const experience =
+      sorted
+        .map((r) => r.notes)
+        .filter((n): n is string => Boolean(n && n.trim()))
+        .join(' / ') || null;
 
     return {
       day,
-      amIn: formatTime12h(first.time_in),
-      amOut: formatTime12h(first.time_out),
-      pmIn: formatTime12h(last.time_in),
-      pmOut: formatTime12h(last.time_out),
-      totalHours: formatHours(hours),
-      // Only the morning session's note describes the day. A second note is
-      // still shown rather than dropped — concatenating would run the two
-      // together into a sentence that was never written.
-      experience: sorted
-        .map((r) => r.notes)
-        .filter((n): n is string => Boolean(n && n.trim()))
-        .join(' / ') || null,
+      amIn: morning.in,
+      amOut: morning.out,
+      // Straight out of the latest record, never merged cell-by-cell with the
+      // morning's. Merging is how an afternoon session on one record and a
+      // second record on the same day would produce a time in from one and a time
+      // out from the other — a session that was never worked.
+      pmIn: afternoon.in,
+      pmOut: afternoon.out,
+      totalHours: formatHours(
+        round2(
+          sorted.reduce((sum, r) => sum + round2(r.total_hours), 0),
+        ),
+      ),
+      experience,
     };
   });
 };

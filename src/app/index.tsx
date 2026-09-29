@@ -1,7 +1,6 @@
-import { useEffect, useMemo } from 'react';
+import { useMemo } from 'react';
 import { Redirect } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import * as SplashScreen from 'expo-splash-screen';
 import {
   ActivityIndicator,
   Image,
@@ -22,21 +21,18 @@ import splashIcon from '../../assets/splash-icon.png';
  * this screen's `loading` state rather than a separate route: no extra
  * navigation hop, and no flash between a splash route and the real gate.
  *
- * The native splash is held by `preventAutoHideAsync()` in `_layout.tsx` and
- * released here. If opening the database failed, `error` is set and the gate
- * shows the message instead of silently redirecting to a login screen that
- * cannot work.
+ * This is the app's only launch screen. It is pure JS, so it renders the same in
+ * Expo Go as in a standalone build — unlike the native splash, which Expo Go
+ * replaces with the app icon and which is no longer configured. See
+ * `_layout.tsx` -> "No native splash control, deliberately".
+ *
+ * If opening the database failed, `error` is set and the gate shows the message
+ * instead of silently redirecting to a login screen that cannot work.
  */
 export default function Index() {
   const { status, error, user } = useApp();
   const { colors: c } = useTheme();
   const styles = useMemo(() => createStyles(c), [c]);
-
-  // Released on every terminal status, including `error` — a splash held over a
-  // failure screen is the one way this can look genuinely broken.
-  useEffect(() => {
-    if (status !== 'loading') SplashScreen.hide();
-  }, [status]);
 
   if (status === 'loading') {
     return (

@@ -114,6 +114,41 @@ export const MIGRATIONS: Migration[] = [
       ALTER TABLE users ADD COLUMN block TEXT;
     `,
   },
+
+  // v4 adds the four attendance time fields the TMC form actually asks for:
+  // AM Time In, AM Time Out, PM Time In, PM Time Out.
+  //
+  // Until now the app stored one `time_in`/`time_out` pair per day and the
+  // template *duplicated* it into all four boxes, so the PM half of every
+  // printed form was a copy of the AM half. That is the school's convention for
+  // a straight shift, but it is not data — there was no way to record a genuine
+  // morning session and a genuine afternoon one. → [[PDF Export#The AM/PM rule]]
+  //
+  // **The backfill fills AM only, deliberately.** Populating PM as well would
+  // make `computeDayMinutes` see two sessions and double every historical total:
+  // a day stored as 08:00–17:00 with a 60-minute break is 480 minutes, and
+  // duplicating the pair would make it 1020. Filling AM alone keeps
+  // `total_minutes` correct without recomputing a single row, and the template's
+  // straight-shift fallback prints the AM pair into the PM boxes for those rows,
+  // so existing forms print byte-for-byte as they did before.
+  //
+  // The columns stay nullable. A student who worked only a morning has no PM
+  // session, and `NULL` is how the form, the schema and the template all agree
+  // on that — a fabricated afternoon would be worse than a blank cell on a
+  // document a supervisor signs.
+  {
+    version: 4,
+    up: `
+      ALTER TABLE time_records ADD COLUMN am_time_in  TEXT;
+      ALTER TABLE time_records ADD COLUMN am_time_out TEXT;
+      ALTER TABLE time_records ADD COLUMN pm_time_in  TEXT;
+      ALTER TABLE time_records ADD COLUMN pm_time_out TEXT;
+
+      UPDATE time_records
+         SET am_time_in  = time_in,
+             am_time_out = time_out;
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.reduce(

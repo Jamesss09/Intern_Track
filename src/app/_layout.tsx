@@ -1,7 +1,12 @@
+// Side effect only. Must be first: it filters a dev warning that Expo Router
+// raises from its own initial-URL promise, and the root layout is evaluated
+// before that promise settles.
+import '@/dev/ignoreUpstreamWarnings';
+
 import { useMemo } from 'react';
+import { View } from 'react-native';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
-import * as SplashScreen from 'expo-splash-screen';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { AppProvider } from '@/context/AppContext';
 import { ThemeProvider } from '@/context/ThemeContext';
@@ -9,20 +14,25 @@ import { useTheme } from '@/hooks/useTheme';
 import { fontSize, fontWeight } from '@/constants/theme';
 
 /**
- * Global scope, deliberately not inside a component.
+ * No native splash control, deliberately.
  *
- * The SDK 57 guidance is explicit that `preventAutoHideAsync` belongs at module
- * scope: called from a component, it can land after the native splash has
- * already auto-hidden, which leaves the splash showing for an unpredictable
- * moment. `hideAsync` is then driven from `index.tsx` once the database has
- * finished opening.
+ * This used to call `setOptions({ duration: 600 })` and `preventAutoHideAsync()`,
+ * holding the native splash until `index.tsx` released it. Two reasons that was
+ * wrong:
  *
- * `duration` is a little over the 400 ms default so the branded hand-off into
- * `index.tsx` is not a hard cut. `fade` is deliberately omitted — it is iOS
- * only, and v1 targets Android. → [[Decisions#D-011 — Verify every Expo API against the installed SDK]]
+ *  1. It showed the launch screen **twice** on every cold start — the native
+ *     splash, then the branded screen in `index.tsx`. The branded one is the
+ *     design; the native one was a 600 ms delay in front of it.
+ *  2. Since SDK 52, Expo Go shows the app icon instead of the splash screen, so
+ *     the config in `app.json` does not reach it at all. The hold was buying
+ *     nothing in the environment this app actually runs in.
+ *     → [[Decisions#D-011 — Verify every Expo API against the installed SDK]]
+ *
+ * What covers the gap instead is `index.tsx`'s own branded screen, which is pure
+ * JS and so renders identically in Expo Go and in a standalone build. The splash
+ * configuration was removed from `app.json` for the same reason; if the app ever
+ * ships as a real binary, put it back there rather than holding it from JS.
  */
-SplashScreen.setOptions({ duration: 600 });
-SplashScreen.preventAutoHideAsync();
 
 /**
  * Root layout. Providers only - no auth logic here.
@@ -62,13 +72,15 @@ function ThemedStack() {
   /*
    * Nothing renders until the stored preference is read.
    *
-   * The native splash is still up at this point — `index.tsx` releases it, and
-   * `index.tsx` is inside this navigator — so holding here costs no visible
-   * delay, and it is the only way to avoid a light flash for a dark-mode user on
-   * every cold launch. Rendering children first and correcting a frame later
-   * would show exactly that flash.
+   * This used to `return null`, and that was safe only because the native splash
+   * was held over it. With the hold gone, `null` would be a blank frame on every
+   * cold start — so it paints the brand background instead, which is the same
+   * colour `index.tsx` uses for the screen that replaces it. The window is a
+   * local AsyncStorage read, and `brandDark` is dark in both modes, so neither a
+   * white flash nor the light-then-dark flash a dark-mode user would otherwise
+   * get.
    */
-  if (!hydrated) return null;
+  if (!hydrated) return <View style={{ flex: 1, backgroundColor: c.brandDark }} />;
 
   return (
     <>

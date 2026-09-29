@@ -10,15 +10,21 @@
 import type { InternshipSummary, TimeRecord, TimeRecordFilter } from '@/types';
 import { getDatabase } from '@/database/database';
 import * as queries from '@/database/queries';
-import { computeTotalMinutes, minutesToHours, TimeCalculationError } from '@/utils/timeCalculator';
+import {
+  computeDayMinutes,
+  daySpan,
+  minutesToHours,
+  timeToMinutes,
+  TimeCalculationError,
+  type DaySessions,
+} from '@/utils/timeCalculator';
 import { summarize } from '@/utils/progressCalculator';
 import { assertRecordableDate } from '@/utils/dateRestriction';
+import { endOfMonthIso, startOfMonthIso } from '@/utils/dateFormatter';
 
-export interface RecordInput {
+export interface RecordInput extends DaySessions {
   internship_id: number;
   date: string;
-  time_in: string;
-  time_out: string;
   break_minutes: number;
   notes?: string | null;
 }
@@ -55,13 +61,36 @@ export const parseBreakInput = (raw: string): number | null => {
   return hours * 60 + minutes;
 };
 
-const resolveDurations = (input: {
-  time_in: string;
-  time_out: string;
-  break_minutes: number;
-}): { total_minutes: number; total_hours: number } => {
-  const totalMinutes = computeTotalMinutes(input.time_in, input.time_out, input.break_minutes);
-  return { total_minutes: totalMinutes, total_hours: minutesToHours(totalMinutes) };
+/**
+ * Turn a day's four times into everything the row stores.
+ *
+ * The `time_in`/`time_out` span and both totals are all **derived here**, never
+ * accepted from the caller. If a screen could pass its own `total_hours`, the
+ * on-screen total, the printed total and the SQL aggregate would eventually
+ * disagree — and the printed one is the number a college verifies. See vault
+ * note `Database` -> "The Time Calculation Rule".
+ *
+ * `computeDayMinutes` runs first so a half-filled session or an over-long break
+ * throws with its own message, before `daySpan` gets a chance to return a null
+ * out that would hide the mistake one layer up.
+ */
+const resolveDurations = (input: DaySessions & { break_minutes: number }) => {
+  const totalMinutes = computeDayMinutes(input, input.break_minutes);
+  const span = daySpan(input);
+
+  // Unreachable: `computeDayMinutes` rejects a day with no sessions, and
+  // `daySpan` returns nulls only for exactly that case. Narrowed rather than
+  // defaulted so a future change cannot write the literal "null" into the row.
+  if (span.time_in === null || span.time_out === null) {
+    throw new TimeCalculationError('Enter at least one session — AM or PM time in and time out');
+  }
+
+  return {
+    time_in: span.time_in,
+    time_out: span.time_out,
+    total_minutes: totalMinutes,
+    total_hours: minutesToHours(totalMinutes),
+  };
 };
 
 /**
@@ -83,10 +112,12 @@ export const createRecord = async (input: RecordInput): Promise<number> => {
   return queries.insertTimeRecord(db, {
     internship_id: input.internship_id,
     date: input.date,
-    time_in: input.time_in,
-    time_out: input.time_out,
-    break_minutes: input.break_minutes,
     ...durations,
+    am_time_in: input.am_in,
+    am_time_out: input.am_out,
+    pm_time_in: input.pm_in,
+    pm_time_out: input.pm_out,
+    break_minutes: input.break_minutes,
     notes: input.notes?.trim() || null,
   });
 };
@@ -110,10 +141,12 @@ export const updateRecord = async (id: number, input: Omit<RecordInput, 'interns
 
   await queries.updateTimeRecord(db, id, {
     date: input.date,
-    time_in: input.time_in,
-    time_out: input.time_out,
-    break_minutes: input.break_minutes,
     ...durations,
+    am_time_in: input.am_in,
+    am_time_out: input.am_out,
+    pm_time_in: input.pm_in,
+    pm_time_out: input.pm_out,
+    break_minutes: input.break_minutes,
     notes: input.notes?.trim() || null,
   });
 };
@@ -162,6 +195,65 @@ export const getDailyTotals = async (internshipId: number): Promise<DailyTotal[]
     total_hours: minutesToHours(row.total_minutes),
   }));
 };
+
+/** What the placement has logged, per month, so the export screen can offer the right one. */
+export interface MonthSummary {
+  /** `YYYY-MM`. */
+  month: string;
+  total_minutes: number;
+  total_hours: number;
+  day_count: number;
+}
+
+/**
+ * The months that have records, oldest first.
+ *
+ * Backed by a `GROUP BY` over `substr(date, 1, 7)`, so it is a single query
+ * rather than N — the export screen calls it on every month change.
+ */
+export const listMonthsWithRecords = async (internshipId: number): Promise<MonthSummary[]> => {
+  const db = await getDatabase();
+  const rows = await queries.listMonthsWithRecords(db, internshipId);
+
+  return rows.map((row) => ({
+    month: row.month,
+    total_minutes: row.total_minutes,
+    total_hours: minutesToHours(row.total_minutes),
+    day_count: row.day_count,
+  }));
+};
+
+/**
+ * One month's attendance records and their total, in a single call.
+ *
+ * The TMC export takes **this** and nothing else, so the document is built from
+ * one query with one set of bounds. A month with no records is a legitimate
+ * answer — a student back-filling a placement is allowed to print a blank
+ * sheet — so this does not throw; it returns an empty list and a zero total, and
+ * the screen is what decides whether that is worth warning about.
+ */
+export const getMonthAttendance = async (
+  internshipId: number,
+  monthIso: string,
+): Promise<{ records: TimeRecord[]; total_minutes: number; total_hours: number; day_count: number }> => {
+  const db = await getDatabase();
+  const from = startOfMonthIso(monthIso);
+  const to = endOfMonthIso(monthIso);
+
+  const records = await queries.listMonthRecords(db, internshipId, from, to);
+  const totals = await queries.getMonthTotals(db, internshipId, from, to);
+
+  return {
+    records,
+    total_minutes: totals?.total_minutes ?? 0,
+    total_hours: minutesToHours(totals?.total_minutes ?? 0),
+    day_count: totals?.day_count ?? 0,
+  };
+};
+
+/** True when a stored `HH:MM` is usable, for validating a partial form. */
+export const isValidTime = (value: string | null | undefined): value is string =>
+  typeof value === 'string' && timeToMinutes(value) !== null;
 
 /**
  * The single source of truth for "how far along am I".

@@ -29,7 +29,7 @@ import {
  * is native code — adding it would take the app out of Expo Go, which is the one
  * constraint this whole redesign has to respect. Presets cover the question a
  * student actually asks of a records list ("show me this week") and cost
- * nothing. → [[Open Questions|Q8]]
+ * nothing. → [[Open Questions|R15]]
  */
 type RangeKey = 'all' | '7d' | '30d' | 'month' | 'year';
 

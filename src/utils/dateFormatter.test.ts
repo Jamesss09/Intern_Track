@@ -7,12 +7,16 @@
  */
 
 import {
+  HOUR_LABELS,
+  MINUTE_LABELS,
   daysInMonthIso,
   endOfMonthIso,
   formatDateLong,
   monthLabel,
+  partsToTime24,
   shiftMonthIso,
   startOfMonthIso,
+  timeToParts,
   todayIso,
 } from '@/utils/dateFormatter';
 
@@ -127,5 +131,83 @@ describe('todayIso', () => {
     const today = todayIso();
     expect(today >= startOfMonthIso(today)).toBe(true);
     expect(today <= endOfMonthIso(today)).toBe(true);
+  });
+});
+
+describe('HOUR_LABELS / MINUTE_LABELS — what the picker can offer', () => {
+  it('offers 1 to 12, never 0 and never 13', () => {
+    // A clock face has no hour 0 and no hour 13, and a list containing either is
+    // a picker the student can put the app into an invalid state from.
+    expect(HOUR_LABELS).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  });
+
+  it('offers every minute of the hour, one at a time', () => {
+    // Deliberately not a 5-minute step. A supervisor's sign-off is not
+    // approximate, and a picker that cannot produce 08:07 forces the student onto
+    // another screen to record what they actually worked.
+    expect(MINUTE_LABELS).toHaveLength(60);
+    expect(MINUTE_LABELS[0]).toBe(0);
+    expect(MINUTE_LABELS[59]).toBe(59);
+    expect(MINUTE_LABELS.every((m, i) => m === i)).toBe(true);
+  });
+});
+
+describe('timeToParts / partsToTime24 — the picker’s storage conversion', () => {
+  it.each([
+    ['00:00', { hour: 12, minute: 0, meridiem: 'AM' }, 'midnight'],
+    ['00:07', { hour: 12, minute: 7, meridiem: 'AM' }, 'just after midnight'],
+    ['09:30', { hour: 9, minute: 30, meridiem: 'AM' }, 'a morning'],
+    ['11:59', { hour: 11, minute: 59, meridiem: 'AM' }, 'the last minute before noon'],
+    ['12:00', { hour: 12, minute: 0, meridiem: 'PM' }, 'noon'],
+    ['13:05', { hour: 1, minute: 5, meridiem: 'PM' }, 'an early afternoon'],
+    ['17:45', { hour: 5, minute: 45, meridiem: 'PM' }, 'a late afternoon'],
+    ['23:59', { hour: 11, minute: 59, meridiem: 'PM' }, 'the last minute of the day'],
+  ])('%s is %o (%s) on a 12-hour clock', (time24, parts) => {
+    expect(timeToParts(time24)).toEqual(parts);
+  });
+
+  it.each([
+    ['00:00', '12 AM'],
+    ['12:00', '12 PM'],
+    ['23:59', '11:59 PM'],
+    ['08:00', '8:00 AM'],
+    ['13:00', '1:00 PM'],
+  ])('round-trips %s without losing the midnight/noon distinction', (time24) => {
+    // The bug these two functions exist to prevent: `00:00` becoming `12:00`, so
+    // a midnight shift silently turning into a lunch break.
+    expect(partsToTime24(timeToParts(time24))).toBe(time24);
+  });
+
+  it('round-trips every minute of the day', () => {
+    for (let h = 0; h < 24; h++) {
+      for (const m of [0, 1, 30, 59]) {
+        const time24 = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+        expect(partsToTime24(timeToParts(time24))).toBe(time24);
+      }
+    }
+  });
+
+  it('is the only place the two representations meet', () => {
+    // Storage is 24-hour everywhere else — the database, `computeSessionMinutes`,
+    // the printed form. If these ever drifted, the value the student picked would
+    // not be the value that got stored.
+    for (let h = 0; h < 24; h++) {
+      const time24 = `${String(h).padStart(2, '0')}:00`;
+      expect(timeToParts(partsToTime24(timeToParts(time24)))).toEqual(timeToParts(time24));
+    }
+  });
+
+  it('zero-pads the hour it returns', () => {
+    // Storage is `HH:MM`. An unpadded `8:00` fails `TIME_PATTERN` in the
+    // calculator and is rejected as an invalid time the student did not type.
+    expect(partsToTime24({ hour: 8, minute: 0, meridiem: 'AM' })).toBe('08:00');
+    expect(partsToTime24({ hour: 12, minute: 5, meridiem: 'PM' })).toBe('12:05');
+  });
+
+  it('falls back to midnight for input it cannot parse rather than throwing', () => {
+    // The picker seeds its draft from this, and a thrown error inside a render
+    // would take the whole form down over a value the student can change.
+    expect(timeToParts('nonsense')).toEqual({ hour: 12, minute: 0, meridiem: 'AM' });
+    expect(timeToParts('')).toEqual({ hour: 12, minute: 0, meridiem: 'AM' });
   });
 });

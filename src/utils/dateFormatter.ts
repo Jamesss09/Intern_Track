@@ -65,6 +65,68 @@ export const formatTime12h = (time24: string): string => {
 export const formatTimeRange = (timeIn: string, timeOut: string): string =>
   `${formatTime12h(timeIn)} – ${formatTime12h(timeOut)}`;
 
+/**
+ * A wall-clock time split into the parts a 12-hour picker shows.
+ *
+ * `hour` is 1–12 and `meridiem` is separate, because that is the only way a
+ * picker can offer a clock face without a 24-hour list. Storage stays 24-hour:
+ * these two functions are the entire conversion, and they are inverses.
+ */
+export interface TimeParts {
+  /** 1–12. Never 0 and never 13. */
+  hour: number;
+  /** 0–59. */
+  minute: number;
+  meridiem: 'AM' | 'PM';
+}
+
+/** Midnight and noon are the two values with no intuitive hour, so they are pinned. */
+export const HOUR_LABELS: readonly number[] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+
+/** Every minute of an hour. A 5-minute step is tempting and wrong here. */
+export const MINUTE_LABELS: readonly number[] = Array.from({ length: 60 }, (_, i) => i);
+
+/**
+ * `HH:MM` -> the parts a 12-hour picker shows.
+ *
+ * `00:00` becomes 12:00 AM and `12:00` becomes 12:00 PM, which is the one place
+ * an hour arithmetic bug is invisible on the form but obvious on the picker: a
+ * midnight shift picking "12 AM" must not turn into noon. Modulo 12 gets both
+ * right without a special case, because `0 % 12 === 12` and `12 % 12 === 0`, and
+ * the `0 → 12` fixup below then maps that `0` back to `12`.
+ */
+export const timeToParts = (time24: string): TimeParts => {
+  const [h, m] = time24.split(':').map(Number);
+  const hour24 = Number.isFinite(h) ? h : 0;
+  const minute = Number.isFinite(m) ? m : 0;
+
+  return {
+    hour: hour24 % 12 === 0 ? 12 : hour24 % 12,
+    minute,
+    meridiem: hour24 < 12 ? 'AM' : 'PM',
+  };
+};
+
+/**
+ * The inverse of `timeToParts`. Always returns a zero-padded `HH:MM`.
+ *
+ * `hour % 12` does all the work, and the meridiem only ever adds twelve. It has
+ * to be `% 12` on the raw hour rather than on `hour - 1`: the two agree at 12
+ * and disagree everywhere else, and `((hour - 1) % 12) + 12` — the shape this
+ * used to have — maps 8 AM to **07:00**. That is not a display artefact; it is
+ * the value written to the database, so a student picking 8 AM logged 7 AM and
+ * the college verified a number the app had never shown them.
+ *
+ * Midnight and noon are the pair that decides whether the formula is right:
+ * `12 % 12 === 0`, so 12 AM is `00` and 12 PM is `00 + 12 === 12`.
+ */
+export const partsToTime24 = ({ hour, minute, meridiem }: TimeParts): string => {
+  const h = hour % 12 === 0 ? 0 : hour % 12;
+  const h24 = meridiem === 'PM' ? h + 12 : h;
+
+  return `${String(h24).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+};
+
 /** Today's date as `YYYY-MM-DD` in the device's local timezone. */
 export const todayIso = (): string => {
   const now = new Date();
@@ -113,9 +175,12 @@ export const startOfYearIso = (iso: string): string => `${parseIsoDate(iso).getF
  * October.
  *
  * Day 0 of the *following* month is the last day of this one, which is why this
- * uses `getMonth() + 1` and day `0` rather than hardcoding lengths — the TMC
- * daily time record always prints 31 numbered rows, so the template needs to
- * know which of them belong to a real day.
+ * uses `getMonth() + 1` and day `0` rather than hardcoding lengths.
+ *
+ * The TMC daily time record prints **one numbered row per real day**, not a
+ * fixed 31, so this is the number of rows a sheet will have and the denominator
+ * for "N of M rows filled". An earlier version of that screen hardcoded 31 and
+ * told September students to look for a 31st row that was never printed.
  */
 export const daysInMonthIso = (iso: string): number => {
   const d = parseIsoDate(iso);

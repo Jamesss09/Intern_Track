@@ -207,13 +207,18 @@ export const insertTimeRecord = async (
 ): Promise<number> => {
   const result = await db.runAsync(
     `INSERT INTO time_records
-       (internship_id, date, time_in, time_out, break_minutes,
-        total_minutes, total_hours, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (internship_id, date, time_in, time_out,
+        am_time_in, am_time_out, pm_time_in, pm_time_out,
+        break_minutes, total_minutes, total_hours, notes)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     r.internship_id,
     r.date,
     r.time_in,
     r.time_out,
+    r.am_time_in,
+    r.am_time_out,
+    r.pm_time_in,
+    r.pm_time_out,
     r.break_minutes,
     r.total_minutes,
     r.total_hours,
@@ -290,6 +295,10 @@ export const updateTimeRecord = (
     date: string;
     time_in: string;
     time_out: string;
+    am_time_in: string | null;
+    am_time_out: string | null;
+    pm_time_in: string | null;
+    pm_time_out: string | null;
     break_minutes: number;
     total_minutes: number;
     total_hours: number;
@@ -298,12 +307,17 @@ export const updateTimeRecord = (
 ) =>
   db.runAsync(
     `UPDATE time_records
-        SET date = ?, time_in = ?, time_out = ?, break_minutes = ?,
-            total_minutes = ?, total_hours = ?, notes = ?
+        SET date = ?, time_in = ?, time_out = ?,
+            am_time_in = ?, am_time_out = ?, pm_time_in = ?, pm_time_out = ?,
+            break_minutes = ?, total_minutes = ?, total_hours = ?, notes = ?
       WHERE id = ?`,
     fields.date,
     fields.time_in,
     fields.time_out,
+    fields.am_time_in,
+    fields.am_time_out,
+    fields.pm_time_in,
+    fields.pm_time_out,
     fields.break_minutes,
     fields.total_minutes,
     fields.total_hours,
@@ -338,4 +352,79 @@ export const getDailyTotals = (db: SQLiteDatabase, internshipId: number) =>
       GROUP BY date
       ORDER BY date DESC`,
     [internshipId],
+  );
+
+/**
+ * **The TMC form's data source.** Every attendance record in one month.
+ *
+ * A statement of its own rather than a `filterTimeRecords` call, because this
+ * query is the difference between a form full of rows and a blank one that
+ * still looks valid — the failure is invisible, because a month with nothing
+ * logged and a month that was queried wrongly print identically. Giving the
+ * export its own statement means it cannot be broken by an edit to a filter
+ * meant for a list screen, and it makes the bounds reviewable in one place:
+ *
+ *   from = `YYYY-MM-01`   (inclusive)
+ *   to   = `YYYY-MM-<last day of that month>`   (inclusive)
+ *
+ * Both bounds are computed by `utils/dateFormatter` and passed in. The month
+ * length is real calendar arithmetic — 30 for September, 31 for October, 29 for
+ * a leap February — never a hardcoded 31, which is what would silently drop the
+ * last day of every 30-day month. → [[PDF Export#Month Selection]]
+ *
+ * `date` is ISO text, so the comparison is lexicographic and no date parsing
+ * happens in SQL. Ordering is `date ASC, time_in ASC`: ascending because a time
+ * sheet is read top to bottom, and the template re-groups by day regardless.
+ */
+export const listMonthRecords = (
+  db: SQLiteDatabase,
+  internshipId: number,
+  fromIso: string,
+  toIso: string,
+) =>
+  db.getAllAsync<TimeRecord>(
+    `SELECT * FROM time_records
+      WHERE internship_id = ?
+        AND date >= ?
+        AND date <= ?
+      ORDER BY date ASC, time_in ASC`,
+    [internshipId, fromIso, toIso],
+  );
+
+/**
+ * Every month in the placement that has at least one record, with its totals.
+ *
+ * Backs the export screen's "which months actually have data" list. That list
+ * exists because of the exact bug this feature set fixes: a student whose
+ * records are all in September, asking for October, got a blank sheet and no
+ * indication that September was the month they wanted. The screen can now name
+ * the months instead of leaving the student to step through the arrows.
+ *
+ * `substr(date, 1, 7)` on an ISO date yields `YYYY-MM` with no parsing, which
+ * is why this can be a `GROUP BY` at all. `COUNT(DISTINCT date)` is the number
+ * of *days*, not rows, so a split day counts once — matching the form, which
+ * prints one numbered row per day.
+ */
+export const listMonthsWithRecords = (db: SQLiteDatabase, internshipId: number) =>
+  db.getAllAsync<{ month: string; total_minutes: number; day_count: number }>(
+    `SELECT substr(date, 1, 7)              AS month,
+            COALESCE(SUM(total_minutes), 0) AS total_minutes,
+            COUNT(DISTINCT date)            AS day_count
+       FROM time_records
+      WHERE internship_id = ?
+      GROUP BY month
+      ORDER BY month ASC`,
+    [internshipId],
+  );
+
+/** Worked minutes and distinct days for one month, or zeros when it is empty. */
+export const getMonthTotals = (db: SQLiteDatabase, internshipId: number, fromIso: string, toIso: string) =>
+  db.getFirstAsync<{ total_minutes: number; day_count: number }>(
+    `SELECT COALESCE(SUM(total_minutes), 0) AS total_minutes,
+            COUNT(DISTINCT date)            AS day_count
+       FROM time_records
+      WHERE internship_id = ?
+        AND date >= ?
+        AND date <= ?`,
+    [internshipId, fromIso, toIso],
   );

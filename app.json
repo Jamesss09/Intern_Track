@@ -31,15 +31,14 @@
       "expo-sqlite",
       "expo-sharing",
       "expo-font",
+      "expo-asset",
       [
-        "expo-splash-screen",
+        "expo-file-system",
         {
-          "backgroundColor": "#26154A",
-          "image": "./assets/splash-icon.png",
-          "imageWidth": 200
+          "enableFileSharing": true,
+          "supportsOpeningDocumentsInPlace": true
         }
-      ],
-      "expo-asset"
+      ]
     ]
   }
 }
