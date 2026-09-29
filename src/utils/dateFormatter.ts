@@ -77,6 +77,32 @@ export const formatTimeRange = (timeIn: string, timeOut: string): string =>
   `${formatTime12h(timeIn)} – ${formatTime12h(timeOut)}`;
 
 /**
+ * `08:00` -> `"8:00"`. The 12-hour clock with **no** AM/PM suffix.
+ *
+ * This exists for the TMC form, whose column headings already read `AM` and `PM`.
+ * Printing `8:00 AM` under a heading that says `AM` is redundant, and it is what
+ * made the value overflow its cell: seven characters in a narrow column, the
+ * browser wrapped it onto a second line, and a wrapped time broke both the 5.9 mm
+ * row height and the one-page budget the entire form is sized against.
+ * → [[PDF Export#The AM/PM rule]]
+ *
+ * **Built by arithmetic, not through `Intl`, on purpose.** A printed document must
+ * not change shape with the device's locale or its ICU build — a
+ * `DateTimeFormat` is a presentation decision made by a phone that has no say in
+ * what a college's form looks like. Deriving the string here also pins the
+ * separator: it is a colon, unconditionally, and no configuration of this code
+ * can produce `8.00`.
+ *
+ * `hour % 12 || 12` is the 12-hour conversion, and the `|| 12` is the midnight
+ * and noon case — `00:30` is `12:30`, not `0:30`, and `12:00` stays `12:00`. The
+ * heading supplies which one it is: `12:30` under `AM` is half past midnight.
+ */
+export const formatTimeNoMeridiem = (time24: string): string => {
+  const [h, m] = time24.split(':').map(Number);
+  return `${h % 12 || 12}:${m < 10 ? '0' : ''}${m}`;
+};
+
+/**
  * A wall-clock time split into the parts a 12-hour picker shows.
  *
  * `hour` is 1–12 and `meridiem` is separate, because that is the only way a

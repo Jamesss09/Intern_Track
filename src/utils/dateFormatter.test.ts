@@ -12,6 +12,7 @@ import {
   daysInMonthIso,
   endOfMonthIso,
   formatDateLong,
+  formatTimeNoMeridiem,
   monthLabel,
   partsToTime24,
   shiftMonthIso,
@@ -19,6 +20,56 @@ import {
   timeToParts,
   todayIso,
 } from '@/utils/dateFormatter';
+
+describe('formatTimeNoMeridiem', () => {
+  /**
+   * The TMC form's time cells, which sit under a column heading that already
+   * reads AM or PM. The heading supplies the half, so repeating it in the cell is
+   * noise — and it is what made the value overflow its cell and wrap.
+   * → [[PDF Export#The AM/PM rule]]
+   */
+  it.each([
+    ['08:00', '8:00', 'a morning hour'],
+    ['17:00', '5:00', 'an afternoon hour, read without the PM'],
+    ['12:00', '12:00', 'noon stays 12, it does not roll to 0'],
+    ['00:30', '12:30', 'half past midnight is 12:30, not 0:30'],
+    ['23:59', '11:59', 'the last minute of the day'],
+    ['09:05', '9:05', 'a single-digit minute keeps its zero'],
+    ['13:00', '1:00', 'a legacy afternoon-only start'],
+  ])('%s -> %s (%s)', (time24, expected) => {
+    expect(formatTimeNoMeridiem(time24)).toBe(expected);
+  });
+
+  it('never emits an AM or PM, because the column heading already says which', () => {
+    for (const t of ['00:00', '06:30', '12:00', '18:45', '23:59']) {
+      expect(formatTimeNoMeridiem(t)).not.toMatch(/AM|PM/i);
+    }
+  });
+
+  it('separates with a colon, never a full stop', () => {
+    // Asked for directly, because `8.00` next to a `TOTAL HRS.` of `8.00` is the
+    // kind of ambiguity that survives a print and gets queried by a supervisor.
+    for (const t of ['08:00', '17:30', '00:05', '12:45']) {
+      expect(formatTimeNoMeridiem(t)).toMatch(/^\d{1,2}:\d{2}$/);
+    }
+  });
+
+  it('is at most five characters, which is what keeps the cell one line', () => {
+    // The 5.9mm row height, and therefore the single-page fit of a 31-day month,
+    // depends on this. Asserted as a property of every hour and four minutes of
+    // each, rather than of the one example that happened to break: the longest
+    // case is a two-digit hour at midnight or noon, five characters, and no time
+    // of day can produce a sixth.
+    let widest = 0;
+    for (let h = 0; h < 24; h += 1) {
+      for (const m of ['00', '09', '30', '59']) {
+        const value = formatTimeNoMeridiem(`${String(h).padStart(2, '0')}:${m}`);
+        if (value.length > widest) widest = value.length;
+      }
+    }
+    expect(widest).toBe(5);
+  });
+});
 
 describe('daysInMonthIso', () => {
   it.each([

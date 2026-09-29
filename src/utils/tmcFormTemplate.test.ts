@@ -18,7 +18,7 @@ import {
   courseBlock,
   type TmcFormData,
 } from '@/utils/tmcFormTemplate';
-import { daysInMonthIso, formatTime12h } from '@/utils/dateFormatter';
+import { daysInMonthIso, formatTimeNoMeridiem } from '@/utils/dateFormatter';
 import type { Internship, TimeRecord, User } from '@/types';
 
 const user = (over: Partial<User> = {}): User => ({
@@ -120,7 +120,7 @@ describe('buildDayRows — one row per numbered day', () => {
 
   it('leaves an unlogged day entirely blank rather than omitting it', () => {
     const rows = buildDayRows('2026-09-01', [rec('2026-09-01')]);
-    expect(rows[0].amIn).toBe('8:00 AM');
+    expect(rows[0].amIn).toBe('8:00');
     expect(rows[1]).toEqual({
       day: 2,
       amIn: null,
@@ -133,7 +133,7 @@ describe('buildDayRows — one row per numbered day', () => {
   });
 
   it('accepts any day in the month, not only the first', () => {
-    expect(buildDayRows('2026-09-17', [rec('2026-09-30')])[29].amIn).toBe('8:00 AM');
+    expect(buildDayRows('2026-09-17', [rec('2026-09-30')])[29].amIn).toBe('8:00');
   });
 
   /**
@@ -184,9 +184,9 @@ describe('buildDayRows — one row per numbered day', () => {
       expect(fromShort).toEqual(fromLong);
       expect(fromShort).toHaveLength(daysInMonthIso(short));
       // The attendance itself, so an all-blank sheet cannot satisfy this.
-      expect(fromShort[1].amIn).toBe('8:00 AM');
-      expect(fromShort[1].amOut).toBe('5:00 PM');
-      expect(fromShort[16].amIn).toBe('8:00 AM');
+      expect(fromShort[1].amIn).toBe('8:00');
+      expect(fromShort[1].amOut).toBe('5:00');
+      expect(fromShort[16].amIn).toBe('8:00');
     },
   );
 });
@@ -203,10 +203,10 @@ describe('buildDayRows — the AM/PM rule', () => {
   it('puts a real afternoon session in the PM cells', () => {
     const [day] = buildDayRows('2026-09-01', [splitRec()]);
 
-    expect(day.amIn).toBe('8:00 AM');
-    expect(day.amOut).toBe('12:00 PM');
-    expect(day.pmIn).toBe('1:00 PM');
-    expect(day.pmOut).toBe('5:00 PM');
+    expect(day.amIn).toBe('8:00');
+    expect(day.amOut).toBe('12:00');
+    expect(day.pmIn).toBe('1:00');
+    expect(day.pmOut).toBe('5:00');
   });
 
   it('does not invent an afternoon from the derived span', () => {
@@ -224,7 +224,7 @@ describe('buildDayRows — the AM/PM rule', () => {
       }),
     ]);
 
-    expect(day.pmOut).toBe('2:30 PM');
+    expect(day.pmOut).toBe('2:30');
   });
 
   it('leaves the PM cells blank on a single-shift day', () => {
@@ -239,8 +239,8 @@ describe('buildDayRows — the AM/PM rule', () => {
     const [day] = buildDayRows('2026-09-01', [rec('2026-09-01')]);
 
     expect(day).toMatchObject({
-      amIn: '8:00 AM',
-      amOut: '5:00 PM',
+      amIn: '8:00',
+      amOut: '5:00',
       pmIn: null,
       pmOut: null,
       totalHours: '8.00',
@@ -259,8 +259,8 @@ describe('buildDayRows — the AM/PM rule', () => {
     ]);
 
     expect(day).toMatchObject({
-      amIn: '7:30 AM',
-      amOut: '11:45 AM',
+      amIn: '7:30',
+      amOut: '11:45',
       pmIn: null,
       pmOut: null,
     });
@@ -322,7 +322,7 @@ describe('buildDayRows — the AM/PM rule', () => {
       }),
     ]);
 
-    expect(day.pmIn).toBe('1:00 PM');
+    expect(day.pmIn).toBe('1:00');
     expect(day.pmOut).toBeNull();
   });
 
@@ -338,8 +338,8 @@ describe('buildDayRows — the AM/PM rule', () => {
       }),
     ]);
 
-    expect(day.pmIn).toBe('1:00 PM');
-    expect(day.pmOut).toBe('5:00 PM');
+    expect(day.pmIn).toBe('1:00');
+    expect(day.pmOut).toBe('5:00');
   });
 
   it('puts the earliest record in AM and the latest in PM on a split day', () => {
@@ -350,10 +350,10 @@ describe('buildDayRows — the AM/PM rule', () => {
     ]);
 
     expect(rows[0]).toMatchObject({
-      amIn: '8:00 AM',
-      amOut: '12:00 PM',
-      pmIn: '1:00 PM',
-      pmOut: '5:00 PM',
+      amIn: '8:00',
+      amOut: '12:00',
+      pmIn: '1:00',
+      pmOut: '5:00',
     });
   });
 
@@ -385,10 +385,10 @@ describe('buildDayRows — the AM/PM rule', () => {
     ]);
 
     expect(rows[0]).toMatchObject({
-      amIn: '8:00 AM',
-      amOut: '12:00 PM',
-      pmIn: '1:00 PM',
-      pmOut: '5:00 PM',
+      amIn: '8:00',
+      amOut: '12:00',
+      pmIn: '1:00',
+      pmOut: '5:00',
     });
   });
 
@@ -431,11 +431,14 @@ describe('buildDayRows — the AM/PM rule', () => {
     // A legacy row, so the span is doing the work — and the span starts at
     // 1:05 PM, so the PM cells are where it belongs. The point of the assertion
     // is the conversion, not the half; the half is what the tests above pin.
+    //
+    // `formatTimeNoMeridiem`, not `formatTime12h`: the PM column heading already
+    // says PM, so the cell reads `1:05` and the printed document never repeats it.
     const [day] = buildDayRows('2026-09-01', [
       rec('2026-09-01', { time_in: '13:05', time_out: '22:45' }),
     ]);
-    expect(day.pmIn).toBe(formatTime12h('13:05'));
-    expect(day.pmOut).toBe(formatTime12h('22:45'));
+    expect(day.pmIn).toBe(formatTimeNoMeridiem('13:05'));
+    expect(day.pmOut).toBe(formatTimeNoMeridiem('22:45'));
     expect(day.amIn).toBeNull();
   });
 
@@ -450,8 +453,8 @@ describe('buildDayRows — the AM/PM rule', () => {
     expect(day).toMatchObject({
       amIn: null,
       amOut: null,
-      pmIn: '1:00 PM',
-      pmOut: '5:00 PM',
+      pmIn: '1:00',
+      pmOut: '5:00',
     });
   });
 
@@ -463,7 +466,7 @@ describe('buildDayRows — the AM/PM rule', () => {
     ]);
 
     expect(day.amIn).toBeNull();
-    expect(day.pmIn).toBe('12:00 PM');
+    expect(day.pmIn).toBe('12:00');
   });
 });
 
@@ -561,6 +564,64 @@ describe('buildTmcFormHtml — the document', () => {
     const html = render();
     expect(html).toContain('<th class="c-time" colspan="2">AM</th>');
     expect(html).toContain('<th class="c-time" colspan="2">PM</th>');
+  });
+
+  /**
+   * The AM/PM headings are the only place the form says AM or PM.
+   *
+   * A time cell used to read `8:00 AM` under a heading that already said AM —
+   * redundant, and seven characters in a column sized for four, which wrapped onto
+   * a second line and broke both the 5.9mm row height and the single-page fit.
+   * Asserted on the cell element, not the class name, because the class name is
+   * in the markup too and would match the wrong thing.
+   */
+  it('never repeats AM or PM inside a time cell', () => {
+    const cells = render({
+      records: [rec('2026-09-01', { am_time_in: '08:00', pm_time_out: '17:30' })],
+    }).match(/<td class="c-time">[^<]*<\/td>/g);
+
+    expect(cells).not.toBeNull();
+    expect(cells!.length).toBeGreaterThan(0);
+    for (const cell of cells!) {
+      expect(cell).not.toMatch(/AM|PM/i);
+    }
+    expect(cells).toContain('<td class="c-time">8:00</td>');
+    expect(cells).toContain('<td class="c-time">5:30</td>');
+  });
+
+  /**
+   * The five printed column widths have to total exactly 100.
+   *
+   * They came to 102.6, and an over-subscribed percentage row is not a near miss:
+   * the browser resolves it by letting the widest content steal width from its
+   * siblings, so the time cells came out narrower than the number asked for. This
+   * is the assertion that stops a future tweak from quietly reintroducing it.
+   *
+   * `.c-time` is declared **once** and used by all four time cells, so it counts
+   * four times over. Summing the four declarations as written gives 76, which is
+   * the right number for a different table and a wrong number for this one.
+   */
+  it('keeps the printed column widths at exactly 100%', () => {
+    const width = (className: string): number => {
+      const match = render().match(new RegExp(`\\.${className}\\s*\\{\\s*width:\\s*([\\d.]+)%`));
+      if (!match) throw new Error(`no width declared for .${className}`);
+      return Number(match[1]);
+    };
+
+    const total =
+      width('c-date') +
+      4 * width('c-time') +
+      width('c-total') +
+      width('c-exp');
+
+    expect(total).toBeCloseTo(100, 5);
+  });
+
+  it('forbids a time cell from wrapping onto a second line', () => {
+    // The row height is what fits 31 days on one page, so a wrapped cell spills
+    // the month onto a second sheet. Asserted in the stylesheet rather than left
+    // to the browser's good behaviour.
+    expect(render()).toMatch(/\.c-time\s*\{\s*white-space:\s*nowrap;\s*\}/);
   });
 
   it('emits 2 info rows, 1 header row, and one row per day', () => {

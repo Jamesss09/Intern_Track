@@ -27,7 +27,7 @@
 
 import type { Internship, TimeRecord, User } from '@/types';
 import { escapeHtml } from './htmlTemplate';
-import { daysInMonthIso, formatDateLong, formatTime12h, parseIsoDate } from './dateFormatter';
+import { daysInMonthIso, formatDateLong, formatTimeNoMeridiem, parseIsoDate } from './dateFormatter';
 import { formatHours } from './progressCalculator';
 import { round2 } from './timeCalculator';
 
@@ -91,7 +91,7 @@ interface SessionCells {
  * place that can see how many sessions the day really has is `buildDayRows`.
  */
 const ownCells = (record: TimeRecord): SessionCells => {
-  const show = (t: string | null): string | null => (t ? formatTime12h(t) : null);
+  const show = (t: string | null): string | null => (t ? formatTimeNoMeridiem(t) : null);
   return {
     amIn: show(record.am_time_in),
     amOut: show(record.am_time_out),
@@ -126,9 +126,10 @@ interface HalfCells {
  *
  * A pre-v4 row carries no half information at all — only the day's start and
  * end — so its own clock values have to decide. A shift starting at or after
- * noon is an afternoon one, and printing it in the AM cells puts "1:00 PM"
- * underneath a heading that says AM. `12:00` counts as afternoon, because that
- * is where the form's AM block ends and its PM block begins.
+ * noon is an afternoon one, and printing it in the AM cells puts "1:00" under a
+ * heading that says AM, where the supervisor reads it as morning. `12:00` counts
+ * as afternoon, because that is where the form's AM block ends and its PM block
+ * begins.
  *
  * `null` for a row that is not legacy: it already knows its own halves, and
  * guessing them would override real data.
@@ -153,11 +154,11 @@ const legacyHalf = (record: TimeRecord): 'am' | 'pm' | null => {
  *  - **true** in the PM half **on a split day**, where a second record really is
  *    a second session and its span is that session.
  *  - **false** otherwise. An afternoon-only shift has no morning, and borrowing
- *    the span would print "1:00 PM – 5:00 PM" in the AM cells — a nine-hour
- *    morning nobody worked. A single-session day has no afternoon, and repeating
- *    the morning across both halves made one nine-hour shift read as two, which
- *    contradicts the row's own `TOTAL HRS.` and is the first thing a supervisor
- *    would query on a form they are being asked to sign.
+ *    the span would print "1:00 – 5:00" in the AM cells — a four-hour morning
+ *    nobody worked. A single-session day has no afternoon, and repeating the
+ *    morning across both halves made one shift read as two, which contradicts the
+ *    row's own `TOTAL HRS.` and is the first thing a supervisor would query on a
+ *    form they are being asked to sign.
  *
  * Either way the pair is kept together: a time in with no time out is a mistyped
  * form, not a short shift, so a half-recorded afternoon prints exactly as
@@ -174,8 +175,8 @@ const halfOf = (record: TimeRecord, half: 'am' | 'pm', substitute: boolean): Hal
   if (!substitute || !isLegacyRow(record)) return own;
 
   return {
-    in: record.time_in ? formatTime12h(record.time_in) : null,
-    out: record.time_out ? formatTime12h(record.time_out) : null,
+    in: record.time_in ? formatTimeNoMeridiem(record.time_in) : null,
+    out: record.time_out ? formatTimeNoMeridiem(record.time_out) : null,
   };
 };
 
@@ -486,11 +487,19 @@ export const buildTmcFormHtml = (data: TmcFormData): string => {
     }
 
     /* The five printed columns. AM and PM each span two of the seven physical
-       columns, which is how the form's four time boxes are produced. */
+       columns, which is how the form's four time boxes are produced.
+
+       These must total exactly 100, counting c-time four times over: 6 plus
+       4x8 plus 10 plus 52. They previously came to 102.6, and an over-subscribed
+       percentage row is not a near miss. The browser resolves it by letting the
+       widest content steal width from its siblings, so the time cells came out
+       narrower than the number asked for and a seven-character time wrapped onto
+       a second line. A wrapped time breaks the 5.9mm row height below, and that
+       row height is what keeps a 31-day month on one page. */
     .c-date  { width: 6%; }
-    .c-time  { width: 8.6%; }
+    .c-time  { width: 8%; }
     .c-total { width: 10%; }
-    .c-exp   { width: 52.2%; }
+    .c-exp   { width: 52%; }
 
     .grid th,
     .grid td {
@@ -518,6 +527,12 @@ export const buildTmcFormHtml = (data: TmcFormData): string => {
     .grid .c-date,
     .grid .c-total,
     .grid .c-time { text-align: center; }
+    .grid .c-time { white-space: nowrap; }
+    /* A time is at most five characters, the longest being 12:00 at midnight or
+       noon, so a cell can never need two lines. Saying so explicitly makes that
+       a guarantee rather than an expectation: a wrapped cell would silently push
+       the row past 5.9mm and spill the month onto a second page, which is the
+       one thing this form is not allowed to do. */
     .grid .c-date { font-weight: bold; }
     .grid .c-exp { text-align: left; line-height: 1.25; }
 
