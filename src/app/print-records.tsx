@@ -34,7 +34,7 @@ import {
   HIT_SIZE,
 } from '@/constants/theme';
 
-type Action = 'generate' | 'print' | 'share' | 'save';
+type Action = 'generate' | 'print' | 'save';
 
 /**
  * Two documents, two audiences.
@@ -68,11 +68,17 @@ interface MonthStats {
 }
 
 /**
- * The months that hold records, as `YYYY-MM` strings.
+ * The months that hold records, as first-of-month `YYYY-MM-DD` keys.
  *
- * Kept as raw strings rather than `MonthSummary`s because the only thing the
+ * Kept as plain strings rather than `MonthSummary`s because the only thing the
  * screen needs from them is a set of reachable months — for the stepper's bounds
  * and for the "your records are over there" warning.
+ *
+ * The database hands these over as `YYYY-MM`; `listMonthsWithRecords`' effect
+ * above converts them. Every comparison against `bounds` below is
+ * lexicographic, and the two shapes are not interchangeable: `'2026-09'` is a
+ * prefix of `'2026-09-01'`, so it sorts *before* it and passes a `>=` test that
+ * was meant to exclude it.
  */
 type MonthList = string[];
 
@@ -87,7 +93,7 @@ const NAMED_MONTHS = 3;
 
 /** `September 2026, October 2026 and November 2026` — or three plus a count. */
 const describeMonths = (months: MonthList): string => {
-  const named = months.slice(-NAMED_MONTHS).map((m) => monthLabel(`${m}-01`));
+  const named = months.slice(-NAMED_MONTHS).map((m) => monthLabel(m));
   const extra = months.length - named.length;
   const list =
     named.length === 1
@@ -172,7 +178,21 @@ export default function PrintRecordsScreen() {
       .then(([attendance, months]) => {
         if (cancelled) return;
         setMonthStats({ month, dayCount: attendance.day_count, hours: attendance.total_hours });
-        setMonthsWithRecords(months.map((m) => m.month));
+        /**
+         * The database names a month `YYYY-MM` — `listMonthsWithRecords` groups
+         * with `substr(date, 1, 7)`. Every other key on this screen is a
+         * first-of-month `YYYY-MM-DD`, because `startOfMonthIso`, `shiftMonthIso`
+         * and every comparison against `bounds` are built on that shape.
+         *
+         * Convert here, at the one point the database's format enters the app.
+         * Left unconverted it fails quietly rather than loudly: `'2026-09'` and
+         * `'2026-09-01'` both look like valid months, and the lexicographic
+         * comparisons that guard `bounds` are all true in the direction that
+         * admits the short one, so it survives every check and then produces
+         * `NaN` bounds, a query that matches no rows, and a sheet with an empty
+         * table. → [[PDF Export#Month Selection]]
+         */
+        setMonthsWithRecords(months.map((m) => startOfMonthIso(`${m.month}-01`)));
       })
       // A failed stats read is not worth interrupting an export over. It leaves
       // the count unknown rather than zero, so a month whose read failed is never
@@ -232,12 +252,13 @@ export default function PrintRecordsScreen() {
   );
 
   /**
-   * Changing format or month invalidates the file already on disk.
+   * Changing format or month invalidates the document already rendered.
    *
    * The result is a rendered document describing a specific month. Left in
    * place, a student who switched from the TMC sheet to the detailed log would
-   * press Share and send September's school form while the screen reads
-   * "Detailed Log" — the cache makes it look like it worked.
+   * press Save File and write September's school form to their Downloads folder
+   * while the screen reads "Detailed Log" — the saved file's real name is the
+   * only clue, so it looks like it worked.
    */
   const chooseFormat = useCallback(
     (next: Format) => {
@@ -260,9 +281,9 @@ export default function PrintRecordsScreen() {
   /**
    * Render the document, or return the one already rendered.
    *
-   * Shared by all three outputs so Save, Share and Print cannot disagree about
-   * which file is on screen. Returns `null` on failure, having already told the
-   * user why.
+   * Shared by both outputs so Save and the on-screen summary cannot disagree
+   * about which document they describe. Returns `null` on failure, having
+   * already told the user why.
    */
   const ensureGenerated = useCallback(async (): Promise<pdfService.GeneratedRecord | null> => {
     if (!user || !internship) return null;
@@ -295,13 +316,13 @@ export default function PrintRecordsScreen() {
         Alert.alert(
           `Nothing logged in ${month ? monthLabel(month) : 'that month'}`,
           target
-            ? `${error.message} Open ${monthLabel(`${target}-01`)} instead?`
+            ? `${error.message} Open ${monthLabel(target)} instead?`
             : error.message,
           target
             ? [
                 { text: 'Cancel', style: 'cancel' },
                 {
-                  text: `Open ${monthLabel(`${target}-01`)}`,
+                  text: `Open ${monthLabel(target)}`,
                   onPress: () => {
                     setMonthIso(target);
                     reset();
@@ -327,12 +348,12 @@ export default function PrintRecordsScreen() {
    *
    * The old screen had one "Share / Save" button, which opened the system share
    * sheet and hoped the student found "Save to Files" inside it — and on Android
-   * the sheet's own destinations are chosen by the *receiver*, so a destination
-   * with no save option silently offered nothing at all. Save is now its own
-   * action, and it is deliberately not the same action on both platforms: iOS
-   * writes into `Documents/`, which the Files app browses, while Android has to
-   * ask which folder, because its document directory is app-private and a file
-   * saved there is one the student can never find again.
+   * the sheet's destinations are chosen by the *receiver*, so a destination with
+   * no save option silently offered nothing at all. Save is now its own action,
+   * and it is deliberately not the same action on both platforms: iOS writes into
+   * `Documents/`, which the Files app browses, while Android asks which folder,
+   * because its document directory is app-private and a file saved there is one
+   * the student can never find again.
    * → [[PDF Export#Where the file goes]]
    */
   const onSave = useCallback(async () => {
@@ -341,15 +362,13 @@ export default function PrintRecordsScreen() {
 
     setBusy('save');
     try {
-      const outcome = await pdfService.savePdf(generated.uri, fileName);
+      const outcome = await pdfService.savePdf(generated.base64, fileName);
 
+      // Backing out of the folder picker is a decision, not a failure.
       if (outcome.status === 'cancelled') return;
 
       const { name, location } = outcome.file;
-      Alert.alert(
-        'Saved',
-        `${name}\n\n${location}.\n\nUse Share if you want to send it to someone.`,
-      );
+      Alert.alert('Saved', `${name}\n\n${location}.`);
     } catch (error) {
       Alert.alert(
         'Could not save the file',
@@ -359,23 +378,6 @@ export default function PrintRecordsScreen() {
       setBusy(null);
     }
   }, [ensureGenerated, fileName]);
-
-  const onShare = useCallback(async () => {
-    const generated = await ensureGenerated();
-    if (!generated) return;
-
-    setBusy('share');
-    try {
-      await pdfService.shareRecord(generated.uri, documentTitle);
-    } catch (error) {
-      Alert.alert(
-        'Sharing unavailable',
-        error instanceof Error ? error.message : 'Use "Save File" instead.',
-      );
-    } finally {
-      setBusy(null);
-    }
-  }, [ensureGenerated, documentTitle]);
 
   /**
    * Print goes through the service rather than through the generated file, so it
@@ -637,7 +639,7 @@ export default function PrintRecordsScreen() {
               This sheet would print blank. Your records are in {describeMonths(monthsWithRecords)}.
             </Text>
             <Button
-              label={`Go to ${monthLabel(`${nearestMonthWithRecords}-01`)}`}
+              label={`Go to ${monthLabel(nearestMonthWithRecords)}`}
               onPress={() => {
                 setMonthIso(nearestMonthWithRecords);
                 reset();
@@ -662,7 +664,7 @@ export default function PrintRecordsScreen() {
                 {result.numberOfPages} {result.numberOfPages === 1 ? 'page' : 'pages'} ·{' '}
                 {result.recordCount} {result.recordCount === 1 ? 'day' : 'days'} ·{' '}
                 {formatHours(minutesToHours(result.totalMinutes))} hrs.{'\n'}
-                Save File keeps a named copy on this device; Share sends it on.
+                Save File writes a named PDF copy to a folder you choose.
               </Text>
             )}
           </View>
@@ -701,15 +703,6 @@ export default function PrintRecordsScreen() {
                 ? 'Asks which folder to keep a named copy of the PDF in'
                 : 'Keeps a named copy of the PDF in the Files app'
             }
-          />
-          <Button
-            label="Share"
-            onPress={onShare}
-            variant="secondary"
-            loading={busy === 'share'}
-            disabled={busy !== null && busy !== 'share'}
-            fullWidth
-            accessibilityHint="Opens the system share sheet to send the PDF"
           />
           <Button
             label="Print"

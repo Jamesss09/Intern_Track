@@ -20,11 +20,13 @@ interface BottomSheetProps {
 }
 
 /**
- * The share sheet and the records filter.
+ * In-app sheets: the records filter, and confirmations.
  *
- * `expo-sharing` already opens a system sheet, so this exists for the cases the
- * OS does not cover: choosing filter criteria, and a branded file row that
- * previews the export before it is handed off.
+ * This exists for the cases the OS does not cover — chiefly choosing filter
+ * criteria, and any branded row that previews something before the student
+ * commits to it. Note that it is *not* the file share sheet: exporting is a pair
+ * of real platform actions now, Save File and Print, on a screen of their own
+ * rather than behind a sheet. See `pdfService`.
  *
  * A `Modal` rather than an absolutely-positioned overlay, so the Android back
  * button closes it — `onRequestClose` is mandatory on Android and a modal

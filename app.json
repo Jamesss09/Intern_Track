@@ -29,7 +29,6 @@
       "expo-router",
       "expo-status-bar",
       "expo-sqlite",
-      "expo-sharing",
       "expo-font",
       "expo-asset",
       [

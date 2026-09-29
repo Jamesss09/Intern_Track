@@ -1,10 +1,10 @@
 /**
  * PDF generation and distribution.
  *
- * This is the only file that imports `expo-print`, `expo-sharing` and
- * `expo-file-system`. The HTML itself lives in `utils/htmlTemplate.ts` and
- * `utils/tmcFormTemplate.ts` as pure functions, so a document can be rendered and
- * inspected in a test or on the web with no device.
+ * This is the only file that imports `expo-print` and `expo-file-system`. The
+ * HTML itself lives in `utils/htmlTemplate.ts` and `utils/tmcFormTemplate.ts` as
+ * pure functions, so a document can be rendered and inspected in a test or on
+ * the web with no device.
  *
  * Two formats are produced from one service:
  *
@@ -14,19 +14,18 @@
  *    form, one month to a sheet, for hand-signing. This is the record the
  *    *school* reads. → [[Decisions#D-017 — Two PDF formats, not one replacement]]
  *
- * Three ways out, because a device has three different ways to get a file off
- * it and the old UI only reached one of them: `savePdf` (a real, durable file),
- * `shareRecord` (the system sheet) and `printRecord` / `printTmcForm` (the
- * system print dialog, AirPrint included). See "Where the file goes" below.
+ * Two ways out, because a device has two different ways to get a file off it and
+ * the old UI only reached one of them: `savePdf` (a real, durable file the
+ * student can find again) and `printRecord` / `printTmcForm` (the system print
+ * dialog, AirPrint included). See "Where the file goes" below.
  *
  * Note on filenames: `printToFileAsync` in SDK 57 has no `name` option, so the
- * generated file is named by the OS. `savePdf` is where a real name gets applied,
- * by copying the cache file out under one.
+ * file it renders is named by the OS. `savePdf` is where a real name gets
+ * applied, by writing the PDF bytes out under one.
  */
 
 import { Platform } from 'react-native';
 import * as Print from 'expo-print';
-import * as Sharing from 'expo-sharing';
 import { Asset } from 'expo-asset';
 import { Directory, File, Paths } from 'expo-file-system';
 import type { SQLiteDatabase } from 'expo-sqlite';
@@ -39,7 +38,13 @@ import { buildTmcFormHtml } from '@/utils/tmcFormTemplate';
 import { endOfMonthIso, monthLabel, startOfMonthIso } from '@/utils/dateFormatter';
 
 export interface GeneratedRecord {
-  uri: string;
+  /**
+   * The rendered PDF, base64-encoded.
+   *
+   * This replaced the `file://` uri `printToFileAsync` used to return, because
+   * that uri turned out not to be a file the app could read. See `renderPdf`.
+   */
+  base64: string;
   numberOfPages: number;
   html: string;
   /**
@@ -57,11 +62,45 @@ export interface GeneratedRecord {
 }
 
 /**
- * Build the HTML and render it to a PDF in the app cache directory.
+ * Render HTML to PDF bytes that the app genuinely holds.
  *
- * The cache is not durable — Android may clear it under storage pressure. The
- * caller must offer a share action; a generated PDF that was never shared away
- * is not a backup. See vault note `Security` -> "Data Loss".
+ * `printToFileAsync` writes the PDF into the cache under an OS-assigned name and
+ * hands back a `file://` uri for it. Treating that uri as a usable file is what
+ * this function exists to stop, because on the device it was not one. Every read
+ * of a non-`content://` path is vetted by `FilePermissionService`, which
+ * allowlists only `filesDir` and `cacheDir` *by canonical path* — and
+ * `Sharing.shareAsync` consults that same allowlist before it will build a
+ * content uri at all. When the cache path did not match, `new File(uri).exists`
+ * came back false and the share sheet refused the file outright
+ * ("Not allowed to read file under given URL"), while printing worked fine,
+ * because `printAsync` renders from the HTML and never touches the file.
+ *
+ * Asking for `base64: true` sidesteps the whole allowlist: `expo-print` encodes
+ * the file it just wrote *inside the native module*, with a plain
+ * `RandomAccessFile`, and hands the bytes to JS. Saving then writes those bytes
+ * out itself and never depends on the path again.
+ */
+const renderPdf = async (html: string): Promise<{ base64: string; numberOfPages: number }> => {
+  const { base64, numberOfPages } = await Print.printToFileAsync({ html, base64: true });
+
+  // Reachable when the WebView renders an empty document. A zero-length PDF is
+  // not a usable logbook, and it would be written to the student's folder as
+  // one — so this fails loudly instead of saving nothing.
+  if (!base64) {
+    throw new Error(
+      'The device produced an empty PDF. Press Create PDF again, or close other apps to free up storage.',
+    );
+  }
+
+  return { base64, numberOfPages };
+};
+
+/**
+ * Build the HTML and render it to PDF bytes.
+ *
+ * The bytes are only durable once `savePdf` writes them somewhere the student can
+ * reach — Android may clear the cache at any time, and nothing is written there
+ * that is not a transient. See vault note `Security` -> "Data Loss".
  */
 export const generateOjtRecordPdf = async (
   db: SQLiteDatabase,
@@ -88,10 +127,10 @@ export const generateOjtRecordPdf = async (
   };
 
   const html = buildRecordHtml(data);
-  const { uri, numberOfPages } = await Print.printToFileAsync({ html, base64: false });
+  const { base64, numberOfPages } = await renderPdf(html);
 
   return {
-    uri,
+    base64,
     numberOfPages,
     html,
     recordCount: records.length,
@@ -264,10 +303,10 @@ export const generateTmcFormPdf = async (
     generatedOn: new Date(),
   });
 
-  const { uri, numberOfPages } = await Print.printToFileAsync({ html, base64: false });
+  const { base64, numberOfPages } = await renderPdf(html);
 
   return {
-    uri,
+    base64,
     numberOfPages,
     html,
     recordCount: records.length,
@@ -284,24 +323,6 @@ export const printTmcForm = async (
 ): Promise<void> => {
   const { html } = await generateTmcFormPdf(db, user, internship, monthIso);
   await Print.printAsync({ html });
-};
-
-export const isSharingAvailable = (): Promise<boolean> => Sharing.isAvailableAsync();
-
-/**
- * `dialogTitle` is Android/Web only and `UTI` is iOS only; passing both is
- * harmless and each platform ignores what it does not know.
- */
-export const shareRecord = async (uri: string, title = 'Share OJT Time Record'): Promise<void> => {
-  if (!(await Sharing.isAvailableAsync())) {
-    throw new Error('Sharing is not available on this device. Use Save File instead.');
-  }
-
-  await Sharing.shareAsync(uri, {
-    mimeType: 'application/pdf',
-    UTI: 'com.adobe.pdf',
-    dialogTitle: title,
-  });
 };
 
 // ── where the file goes ───────────────────────────────────────────────────
@@ -393,42 +414,39 @@ const removeSibling = (directory: Directory, name: string): void => {
 };
 
 /**
- * Copy a generated PDF out of the cache and give it a real name.
+ * Write the PDF somewhere the student can find it again, under a real name.
  *
- * `printToFileAsync` writes to the cache under an OS-assigned UUID, and SDK 57
- * has no `name` option to change that — the share sheet's `dialogTitle` is the
- * only naming the old flow had. So the bytes are copied out under a name the
- * student wrote, and the file they keep six weeks later is one they recognise.
+ * The bytes are **written**, not copied. `expo-print` leaves its output in the
+ * cache under an OS-assigned UUID (SDK 57 has no `name` option) and that path is
+ * not reliably readable — see `renderPdf` — so a copy out of it was a copy of
+ * nothing, which is exactly how Save came to report "the PDF is no longer on
+ * this device" for a PDF the app had rendered seconds earlier. Writing straight
+ * from the bytes also means one fewer step between the renderer and the file the
+ * student keeps six weeks later.
  *
  * **Where it goes is platform-specific, because "the document directory" means
  * two different things.**
  *
  * On iOS, `Paths.document` is the app's `Documents` folder, which the Files app
- * browses directly once `enableFileSharing` is set in `app.json`. Copying there
+ * browses directly once `enableFileSharing` is set in `app.json`. Writing there
  * is a real, persistent save with no extra permission and no extra tap.
  *
- * On Android, `Paths.document` is **app-private storage**. A copy there is
- * invisible: no file manager lists it, no share target can reach it, and the
+ * On Android, `Paths.document` is **app-private storage**. A file written there
+ * is invisible: no file manager lists it, no other app can reach it, and the
  * student who saved it cannot find it again. So Android asks the student to pick
- * a real folder — Downloads, Drive, anywhere they can see — and writes into that.
- * This also sidesteps the `'FileSystemFile.copy' has been rejected` failure the
- * private path produced: `FileSystemPath.copy` validates read access on the
- * destination *before* copying, and a path inside the private container fails
- * that check in several ways a real SAF `content://` grant does not.
- *
- * The copy is *not* a move. `printTmcForm` and the screen both still hold the
- * cache `uri`, and moving it out from under them would break the follow-up
- * Share. A PDF is a few hundred KB; the duplicate is cheaper than the bug.
+ * a real folder — Downloads, Drive, anywhere they can see — and writes there.
+ * → [[PDF Export#Where the file goes]]
  */
-export const savePdf = async (uri: string, desiredName: string): Promise<SaveResult> => {
+export const savePdf = async (base64: string, desiredName: string): Promise<SaveResult> => {
   const name = `${safeFileName(desiredName)}.pdf`;
-  const source = new File(uri);
 
-  if (!source.exists || source.size === 0) {
-    throw new Error(
-      'The PDF is no longer on this device. Press Create PDF again, then Save.',
-    );
+  if (!base64) {
+    throw new Error('There is no PDF to save. Press Create PDF again, then Save.');
   }
+
+  // Synchronous by design: the native `write` takes the decoded bytes and hands
+  // them to an `outputStream`, which for a SAF destination is the provider's own.
+  const write = (destination: File): void => destination.write(base64, { encoding: 'base64' });
 
   if (Platform.OS === 'android') {
     let picked: Directory | null;
@@ -441,17 +459,17 @@ export const savePdf = async (uri: string, desiredName: string): Promise<SaveRes
 
     removeSibling(picked, name);
     // `createFile` is the only way to name a document inside a SAF tree. The
-    // alternative, copying *into* the directory, would name the file after the
+    // alternative, writing *into* the directory, would name the file after the
     // cache UUID and the student would be left with a random filename.
     const destination = picked.createFile(name, PDF_MIME);
     try {
-      await source.copy(destination, { overwrite: true });
+      write(destination);
     } catch (error) {
       // Don't leave a zero-byte PDF sitting in the student's folder.
       try {
         destination.delete();
       } catch {
-        /* the copy already failed; the provider's file is not ours to fix */
+        /* the write already failed; the provider's file is not ours to fix */
       }
       throw error;
     }
@@ -466,11 +484,10 @@ export const savePdf = async (uri: string, desiredName: string): Promise<SaveRes
   directory.create({ intermediates: true, idempotent: true });
 
   const destination = new File(directory, name);
-  // Created before the copy, for the same reason Android avoids the private
-  // path: `copy` checks read access on a destination that does not exist yet,
-  // and that check is the fragile step. An existing file is a file.
+  // Truncated rather than appended: re-saving the same month must replace the
+  // old file, not append a second PDF onto the end of the first.
   destination.create({ intermediates: true, overwrite: true });
-  await source.copy(destination, { overwrite: true });
+  write(destination);
 
   return {
     status: 'saved',

@@ -141,7 +141,7 @@ export default function ProgressScreen() {
             </Text>
             <Link href="/print-records" asChild>
               <Button
-                label="Print / Share Record"
+                label="Print / Save Record"
                 onPress={() => {}}
                 fullWidth
                 accessibilityHint="Generates the official OJT record for your supervisor"
