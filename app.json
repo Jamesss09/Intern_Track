@@ -13,13 +13,19 @@
     },
     "android": {
       "package": "com.interntrack.app",
+      "versionCode": 1,
       "adaptiveIcon": {
         "backgroundColor": "#3C2274",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.INTERNET"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png",
@@ -46,6 +52,13 @@
           "microphonePermission": false
         }
       ]
-    ]
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "d66dcd14-d6bf-483d-ae8b-059ab60f02fb"
+      }
+    },
+    "owner": "jeymzzz"
   }
 }

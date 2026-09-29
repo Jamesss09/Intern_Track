@@ -79,8 +79,17 @@ export const appReducer = (state: AppState, action: Action): AppState => {
     case 'summary':
       return { ...state, summary: action.summary };
 
+    /**
+     * Clears `busy`, which every caller relies on.
+     *
+     * `updateProfile` and the three avatar operations end here and nowhere
+     * else — they have no `signedIn` or `error` dispatch on the success path,
+     * so without this the flag latched on at `busy: true` and the Save button
+     * showed a spinner forever after a successful save. No other action
+     * represents "this operation finished".
+     */
     case 'profile':
-      return { ...state, user: action.user };
+      return { ...state, user: action.user, busy: false };
 
     default:
       return state;
