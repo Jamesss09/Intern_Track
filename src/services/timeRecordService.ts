@@ -12,6 +12,7 @@ import { getDatabase } from '@/database/database';
 import * as queries from '@/database/queries';
 import { computeTotalMinutes, minutesToHours, TimeCalculationError } from '@/utils/timeCalculator';
 import { summarize } from '@/utils/progressCalculator';
+import { assertRecordableDate } from '@/utils/dateRestriction';
 
 export interface RecordInput {
   internship_id: number;
@@ -63,7 +64,19 @@ const resolveDurations = (input: {
   return { total_minutes: totalMinutes, total_hours: minutesToHours(totalMinutes) };
 };
 
+/**
+ * Add a day.
+ *
+ * `assertRecordableDate` runs **before** the duration is computed and before the
+ * database is opened. This is the authoritative enforcement of the current-day
+ * rule: the screen already refuses to submit another date, and the form schema
+ * already rejects it, but a check that lives only in the UI is a suggestion.
+ * Anything reaching this function — a screen, a future caller, a stray
+ * `setValue` — is checked here.
+ */
 export const createRecord = async (input: RecordInput): Promise<number> => {
+  assertRecordableDate(input.date);
+
   const db = await getDatabase();
   const durations = resolveDurations(input);
 
@@ -78,8 +91,21 @@ export const createRecord = async (input: RecordInput): Promise<number> => {
   });
 };
 
+/**
+ * Correct a day that is already recorded.
+ *
+ * The stored date is read first, both because the current-day rule needs it — an
+ * update may keep the date it already has, but may not move to another — and
+ * because a `UPDATE` matching zero rows reports success, so an unknown id would
+ * otherwise fail silently and the user would watch their edit evaporate.
+ */
 export const updateRecord = async (id: number, input: Omit<RecordInput, 'internship_id'>) => {
   const db = await getDatabase();
+  const existing = await queries.getTimeRecordById(db, id);
+  if (!existing) throw new Error('That day is no longer in the log.');
+
+  assertRecordableDate(input.date, existing.date);
+
   const durations = resolveDurations(input);
 
   await queries.updateTimeRecord(db, id, {

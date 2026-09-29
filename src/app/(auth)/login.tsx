@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useForm } from 'react-hook-form';
 import {
   Image,
@@ -16,6 +16,7 @@ import { z } from 'zod';
 import { useApp } from '@/hooks/useApp';
 import { useTheme } from '@/hooks/useTheme';
 import { Button, ControlledField } from '@/components/FormField';
+import { AUTH_ERRORS, TooManyAttemptsError } from '@/services/authService';
 import { contentWidth, fontSize, fontWeight, radius, scaledLine, spacing } from '@/constants/theme';
 import splashIcon from '../../../assets/splash-icon.png';
 
@@ -31,6 +32,19 @@ export default function LoginScreen() {
   const { colors: c } = useTheme();
   const styles = useMemo(() => createStyles(c), [c]);
   const [submitted, setSubmitted] = useState(false);
+  const [retryAfter, setRetryAfter] = useState(0);
+
+  const locked = retryAfter > 0;
+
+  // Chained timeouts, not a `setInterval`. An interval declared once would drift
+  // against the real clock and would keep firing after the count reached zero
+  // unless every render re-created it; here each tick schedules its own successor
+  // and the cleanup cancels the pending one on unmount.
+  useEffect(() => {
+    if (retryAfter <= 0) return;
+    const timer = setTimeout(() => setRetryAfter((s) => Math.max(0, s - 1)), 1000);
+    return () => clearTimeout(timer);
+  }, [retryAfter]);
 
   const { control, handleSubmit } = useForm<LoginValues>({
     resolver: zodResolver(schema),
@@ -41,15 +55,20 @@ export default function LoginScreen() {
   const onSubmit = handleSubmit(async (values) => {
     setSubmitted(true);
     clearError();
+    setRetryAfter(0);
     try {
       await login(values.email, values.password);
-    } catch {
-      // Already surfaced through `error` in context.
+    } catch (error) {
+      // Already surfaced through `error` in context. The countdown is the one
+      // thing this screen has to add, and the typed error carries it.
+      if (error instanceof TooManyAttemptsError) setRetryAfter(error.retryAfterSeconds);
     }
   });
 
   const onEdit = () => {
-    if (submitted) clearError();
+    // Guarded on the lockout: a keystroke would otherwise wipe the only thing
+    // explaining why the button is disabled.
+    if (submitted && retryAfter <= 0) clearError();
   };
 
   return (
@@ -104,14 +123,24 @@ export default function LoginScreen() {
             onSubmitEditing={onSubmit}
           />
 
-          {error ? (
-            <View style={styles.alert} accessibilityLiveRegion="polite">
+          {/* One alert, one error channel: the live text is still the context
+              `error`. Only the lockout swaps it, and only for its fixed half —
+              the seconds render beside the live region as a sibling, so a
+              screen reader announces "Too many attempts." once rather than
+              relaying a new number every second for up to five minutes. */}
+          {error || locked ? (
+            <View style={styles.alert}>
               <Ionicons name="alert-circle" size={16} color={c.danger} />
-              <Text style={styles.alertText}>{error}</Text>
+              <View style={styles.alertBody}>
+                <Text style={styles.alertText} accessibilityLiveRegion="polite">
+                  {locked ? AUTH_ERRORS.tooManyAttemptsHead : error}
+                </Text>
+                {locked ? <Text style={styles.countdown}>Try again in {retryAfter}s</Text> : null}
+              </View>
             </View>
           ) : null}
 
-          <Button label="Login" onPress={onSubmit} loading={busy} fullWidth />
+          <Button label="Login" onPress={onSubmit} loading={busy} disabled={locked} fullWidth />
         </View>
 
         <View style={styles.footer}>
@@ -180,11 +209,21 @@ const createStyles = (c: ReturnType<typeof useTheme>['colors']) =>
       borderColor: c.danger,
       padding: spacing.md,
     },
+    alertBody: { flex: 1, gap: 2 },
     alertText: {
-      flex: 1,
       color: c.danger,
       fontSize: fontSize.sm,
       fontWeight: fontWeight.medium,
+    },
+    /**
+     * `tabular-nums` so the number does not shuffle sideways as digits change —
+     * without it a 3-digit countdown visibly jitters once a second.
+     */
+    countdown: {
+      color: c.danger,
+      fontSize: fontSize.xs,
+      fontWeight: fontWeight.bold,
+      fontVariant: ['tabular-nums'],
     },
 
     footer: { alignItems: 'center', paddingVertical: spacing.lg, gap: spacing.lg },

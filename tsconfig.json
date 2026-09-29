@@ -6,7 +6,18 @@
       "@/*": [
         "./src/*"
       ]
-    }
+    },
+    /**
+     * Listed explicitly rather than left to TypeScript's automatic inclusion of
+     * everything in `node_modules/@types` — which is not happening here, so
+     * `describe` / `it` / `expect` went unrecognised in the `*.test.ts` files.
+     *
+     * Naming the list is also what keeps it from drifting: `node` is here
+     * because `services/pdfService.ts` calls `require()` to load the college
+     * seal, and `react` because the JSX namespace comes from it. Adding a
+     * package to this list is the whole change when a new global is needed.
+     */
+    "types": ["jest", "node", "react"]
   },
   "include": [
     "**/*.ts",

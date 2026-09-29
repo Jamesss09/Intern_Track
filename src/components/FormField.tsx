@@ -1,4 +1,4 @@
-import { forwardRef, useMemo } from 'react';
+import { forwardRef, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -33,11 +33,18 @@ interface FormFieldProps extends TextInputProps {
  * they cannot see.
  */
 export const FormField = forwardRef<TextInput, FormFieldProps>(function FormField(
-  { label, error, hint, icon, style, ...inputProps },
+  { label, error, hint, icon, style, secureTextEntry, ...inputProps },
   ref,
 ) {
   const { colors: c } = useTheme();
   const styles = useMemo(() => createStyles(c), [c]);
+
+  const [revealed, setRevealed] = useState(false);
+  /**
+   * `undefined` for an unmasked field, which is exactly what `TextInput` wants
+   * there. The toggle does not need to know which fields are passwords.
+   */
+  const isMasked = secureTextEntry && !revealed;
 
   return (
     <View style={styles.field}>
@@ -58,8 +65,40 @@ export const FormField = forwardRef<TextInput, FormFieldProps>(function FormFiel
           placeholderTextColor={c.textMuted}
           accessibilityLabel={label}
           accessibilityHint={hint}
+          secureTextEntry={isMasked}
           {...inputProps}
         />
+
+        {/* Masked fields only, so the six password inputs across login (1),
+            register (2) and change-password (3) all pick this up from one place,
+            and no other field is affected. */}
+        {secureTextEntry ? (
+          <Pressable
+            onPress={() => setRevealed((v) => !v)}
+            // 8 px of slop around a 20 px glyph clears 44 px without taking
+            // layout width. `inputRow` already has `minHeight: HIT_SIZE`, so
+            // the row does not grow either.
+            hitSlop={8}
+            accessibilityRole="button"
+            accessibilityLabel={revealed ? 'Hide password' : 'Show password'}
+            // Carries more weight here than it usually would: a screen reader
+            // user toggling visibility with no state feedback cannot tell
+            // whether the field ended up masked.
+            accessibilityState={{ selected: revealed }}
+          >
+            {/* Decorative - the Pressable above owns the accessible name, so a
+                second one here would announce the toggle twice. */}
+            <Ionicons
+              name={revealed ? 'eye-off-outline' : 'eye-outline'}
+              size={20}
+              // `textMuted`, not `textSubtle`. At 3.53:1 on `surface` the
+              // latter clears the 3:1 floor for a meaningful graphic, but this
+              // sits inside a populated input row where it reads as disabled.
+              // `textMuted` is 6.8:1 and matches the label weight.
+              color={c.textMuted}
+            />
+          </Pressable>
+        ) : null}
       </View>
 
       {error ? <Text style={styles.error}>{error}</Text> : null}

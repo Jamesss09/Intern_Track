@@ -23,9 +23,25 @@ const TOAST_DELAY_MS = 700;
 /**
  * Signed-in routes.
  *
- * `href: null` removes a tab from the bar without unmounting its screen, so the
- * default `/` (Dashboard) has no redundant tab. See vault note
- * `Architecture` -> "Decision 6".
+ * Five tabs: Dashboard, Records, Progress, Profile, Settings.
+ *
+ * The first four are the mockup's nav. Settings is the fifth, added when Profile
+ * was split — Profile now holds identity and the Edit Details affordance, and
+ * everything app-level moved to Settings. Order puts the two account screens
+ * last, which is also the order of how often they are needed.
+ *
+ * The Dashboard is the `index` route and the default landing screen, so it is
+ * the first tab as well as reachable at `/` — one screen, one tab button.
+ *
+ * It used to carry `href: null`, which hid the button while keeping the screen
+ * mounted, on the reasoning that the default route needs no button. That made
+ * the bar read as three items with nowhere to go "back to" from Records or
+ * Profile, and it did not match the mockup. The `Architecture` note cited for
+ * it ("Decision 6") is about route groups and never covered the tab bar.
+ *
+ * Five is the tightest geometry in the app: at the 320 dp floor each tab gets
+ * 64 dp, and the 11 px labels ("Dashboard", "Progress") are the widest thing in
+ * their slot. No `height` or padding is set here for the reason given below.
  */
 export default function TabsLayout() {
   const { status } = useApp();
@@ -102,8 +118,7 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Today',
-          href: null,
+          title: 'Dashboard',
           // The Dashboard draws its own full-bleed hero instead. A light `bg`
           // header above a navy hero would read as two competing bands.
           headerShown: false,
@@ -157,6 +172,22 @@ export default function TabsLayout() {
           tabBarIcon: ({ color, size, focused }) => (
             <Ionicons
               name={focused ? 'person' : 'person-outline'}
+              color={color}
+              size={size}
+            />
+          ),
+        }}
+      />
+
+      <Tabs.Screen
+        name="settings"
+        options={{
+          title: 'Settings',
+          // The screen draws its own `ScreenHeader`, same as every other tab.
+          headerShown: false,
+          tabBarIcon: ({ color, size, focused }) => (
+            <Ionicons
+              name={focused ? 'settings' : 'settings-outline'}
               color={color}
               size={size}
             />

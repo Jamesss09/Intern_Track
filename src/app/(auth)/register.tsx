@@ -32,6 +32,7 @@ const schema = z
     student_id: z.string().optional(),
     course: z.string().optional(),
     year_level: z.string().optional(),
+    block: z.string().optional(),
     password: passwordSchema,
     confirm_password: z.string().min(1, 'Confirm your password'),
   })
@@ -48,6 +49,7 @@ const DEFAULTS: RegisterValues = {
   student_id: '',
   course: '',
   year_level: '',
+  block: '',
   password: '',
   confirm_password: '',
 };
@@ -81,6 +83,7 @@ export default function RegisterScreen() {
         student_id: values.student_id || null,
         course: values.course || null,
         year_level: values.year_level || null,
+        block: values.block || null,
       });
     } catch {
       // Already surfaced through `error` in context.
@@ -161,6 +164,17 @@ export default function RegisterScreen() {
               icon="ribbon-outline"
               placeholder="e.g. 4th Year"
               onEdit={onEdit}
+            />
+
+            <ControlledField
+              control={control}
+              name="block"
+              label="Block (optional)"
+              icon="grid-outline"
+              placeholder="e.g. 3A"
+              hint="Your section, as the registrar lists it. Used on the TMC form's COURSE/BLOCK cell."
+              onEdit={onEdit}
+              autoCapitalize="characters"
             />
 
             <View style={styles.divider} />

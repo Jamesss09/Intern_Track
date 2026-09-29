@@ -1,15 +1,5 @@
 import { useMemo, useState } from 'react';
-import {
-  Alert,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Switch,
-  Text,
-  View,
-} from 'react-native';
-import { Link } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
+import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -19,22 +9,40 @@ import { Avatar } from '@/components/Avatar';
 import { Button, ControlledField } from '@/components/FormField';
 import { ListRow } from '@/components/ListRow';
 import { ScreenHeader } from '@/components/ScreenHeader';
-import { formatShortDate } from '@/utils/dateFormatter';
-import { formatHours } from '@/utils/progressCalculator';
-import { contentWidth, fontSize, fontWeight, radius, scaledLine, spacing } from '@/constants/theme';
+import { contentWidth, fontSize, fontWeight, radius, spacing } from '@/constants/theme';
 
 const schema = z.object({
   full_name: z.string().min(2, 'Enter your full name'),
   student_id: z.string().optional(),
   course: z.string().optional(),
   year_level: z.string().optional(),
+  /**
+   * Left as typed here and uppercased in `authService`, alongside the other
+   * profile normalisation. `autoCapitalize` is a keyboard hint, not a guarantee
+   * — a paste or a Bluetooth keyboard bypasses it, and this value prints on a
+   * document a supervisor signs.
+   */
+  block: z.string().optional(),
 });
 
 type ProfileValues = z.infer<typeof schema>;
 
+/**
+ * Who the student is, and the fields their supervisor reads.
+ *
+ * Everything app-level — appearance, the placement, security, the data on the
+ * device, the version — moved to Settings. What stays here is what is *about
+ * them*, plus the one control that can change it.
+ *
+ * `Edit Details` is deliberately kept even though the brief listed this screen
+ * as read-only. Without it `student_id`, `course` and `year_level` are frozen at
+ * registration forever, and all three print on the PDF a supervisor signs. A
+ * typo there cannot be corrected without deleting the account and every logged
+ * hour with it.
+ */
 export default function ProfileScreen() {
-  const { user, internship, summary, updateProfile, logout, deleteAccount, busy } = useApp();
-  const { colors: c, elevation, mode, preference, setPreference } = useTheme();
+  const { user, updateProfile, logout, busy } = useApp();
+  const { colors: c, elevation } = useTheme();
   const styles = useMemo(() => createStyles(c), [c]);
 
   const [editing, setEditing] = useState(false);
@@ -46,6 +54,7 @@ export default function ProfileScreen() {
       student_id: user?.student_id ?? '',
       course: user?.course ?? '',
       year_level: user?.year_level ?? '',
+      block: user?.block ?? '',
     },
   });
 
@@ -57,6 +66,7 @@ export default function ProfileScreen() {
       student_id: values.student_id || null,
       course: values.course || null,
       year_level: values.year_level || null,
+      block: values.block || null,
     });
     setEditing(false);
   });
@@ -65,19 +75,6 @@ export default function ProfileScreen() {
     reset();
     setEditing(false);
   };
-
-  const confirmDelete = () => {
-    Alert.alert(
-      'Delete everything?',
-      `This permanently removes your account, your OJT details and every logged record from this device. It cannot be undone. Export a PDF first if you need a copy.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Delete permanently', style: 'destructive', onPress: () => void deleteAccount() },
-      ],
-    );
-  };
-
-  const isDark = mode === 'dark';
 
   return (
     <View style={styles.flex}>
@@ -137,6 +134,15 @@ export default function ProfileScreen() {
                 label="Year level"
                 icon="ribbon-outline"
               />
+              <ControlledField
+                control={control}
+                name="block"
+                label="Block"
+                icon="grid-outline"
+                autoCapitalize="characters"
+                placeholder="e.g. 3A"
+                hint="Printed on the TMC form's COURSE/BLOCK cell. Leave blank to use your year level instead."
+              />
               <View style={styles.buttonRow}>
                 <View style={styles.buttonSlot}>
                   <Button label="Save" onPress={onSave} loading={busy} fullWidth />
@@ -148,9 +154,23 @@ export default function ProfileScreen() {
             </View>
           ) : (
             <View style={styles.rows}>
+              <ListRow icon="person-outline" label="Full name" value={user.full_name} />
+              {/*
+                The email is the username — there is no separate handle, and the
+                column is `UNIQUE` with `COLLATE NOCASE`, so it is the account
+                identifier. Labelling it "Username" keeps the list uniform
+                without inventing a field that does not exist.
+              */}
+              <ListRow icon="at-outline" label="Username" value={user.email} />
               <ListRow icon="id-card-outline" label="Student number" value={user.student_id ?? '—'} />
               <ListRow icon="book-outline" label="Course" value={user.course ?? '—'} />
               <ListRow icon="ribbon-outline" label="Year level" value={user.year_level ?? '—'} />
+              {/*
+                Only shown once it is set. An em-dash here would read as "you
+                have no block" when the truth is "we never asked", and the
+                default is the year level anyway.
+              */}
+              {user.block ? <ListRow icon="grid-outline" label="Block" value={user.block} /> : null}
               <Button
                 label="Edit Details"
                 onPress={() => setEditing(true)}
@@ -161,123 +181,14 @@ export default function ProfileScreen() {
           )}
         </View>
 
-        <View style={[styles.card, elevation.sm]}>
-          <Text style={styles.cardTitle}>Appearance</Text>
-          <View style={styles.themeRow}>
-            <View style={styles.themeText}>
-              <Text style={styles.themeLabel}>Dark mode</Text>
-              <Text style={styles.muted}>
-                {preference === 'system' ? 'Following your device setting' : `Always ${isDark ? 'dark' : 'light'}`}
-              </Text>
-            </View>
-            <Switch
-              value={isDark}
-              onValueChange={(next) => setPreference(next ? 'dark' : 'light')}
-              trackColor={{ false: c.border, true: c.primary }}
-              thumbColor={isDark ? c.onPrimary : c.surface}
-              accessibilityLabel="Dark mode"
-              accessibilityHint="Switch between the dark and light appearance"
-            />
-          </View>
-          {preference !== 'system' ? (
-            <Pressable
-              onPress={() => setPreference('system')}
-              style={styles.resetLink}
-              accessibilityRole="button"
-              accessibilityLabel="Follow device setting"
-            >
-              <Ionicons name="phone-portrait-outline" size={15} color={c.primary} />
-              <Text style={styles.resetText}>Follow device setting</Text>
-            </Pressable>
-          ) : null}
-        </View>
-
-        <View style={[styles.card, elevation.sm]}>
-          <Text style={styles.cardTitle}>OJT placement</Text>
-          {internship ? (
-            <View style={styles.rows}>
-              <ListRow icon="business-outline" label="Company" value={internship.company_name} />
-              <ListRow icon="briefcase-outline" label="Position" value={internship.position} />
-              <ListRow
-                icon="time-outline"
-                label="Required hours"
-                value={`${formatHours(internship.required_hours)} hrs`}
-              />
-              <ListRow
-                icon="calendar-outline"
-                label="Period"
-                // Short form, because `ListRow` caps its value at one line and
-                // "28 September 2026 - 15 January 2027" would be clipped.
-                value={`${formatShortDate(internship.start_date)} – ${
-                  internship.end_date ? formatShortDate(internship.end_date) : 'Ongoing'
-                }`}
-              />
-              {summary ? (
-                <ListRow
-                  icon="checkmark-circle-outline"
-                  label="Days logged"
-                  value={String(summary.dayCount)}
-                />
-              ) : null}
-              <Link href="/internship-setup" asChild>
-                <Button
-                  label="Edit OJT Details"
-                  onPress={() => {}}
-                  variant="secondary"
-                  fullWidth
-                />
-              </Link>
-            </View>
-          ) : (
-            <View style={styles.rows}>
-              <Text style={styles.muted}>No placement set up yet.</Text>
-              <Link href="/internship-setup" asChild>
-                <Button label="Add OJT Details" onPress={() => {}} fullWidth />
-              </Link>
-            </View>
-          )}
-        </View>
-
-        <View style={[styles.card, elevation.sm]}>
-          <Text style={styles.cardTitle}>Security</Text>
-          <Link href="/change-password" asChild>
-            <ListRow
-              icon="lock-closed-outline"
-              label="Change password"
-              onPress={() => {}}
-            />
-          </Link>
-          <Text style={styles.muted}>
-            There is no password reset. Your account lives only on this device, so a forgotten
-            password means deleting the data in the app and every hour logged with it.
-          </Text>
-        </View>
-
-        <View style={[styles.card, elevation.sm]}>
-          <Text style={styles.cardTitle}>Your data</Text>
-          <Text style={styles.muted}>
-            Everything is stored only on this device. Uninstalling the app deletes it, so export
-            a PDF before you do.
-          </Text>
-          <Link href="/print-records" asChild>
-            <Button
-              label="Export OJT Record (PDF)"
-              onPress={() => {}}
-              variant="secondary"
-              fullWidth
-            />
-          </Link>
-        </View>
-
         {/*
           Sign Out stays `secondary` rather than the mockup's red. Delete Account
-          is the irreversible one and already carries `danger`; painting both red
-          would flatten the difference between ending a session and erasing
-          everything.
+          is the irreversible one and now sits in Settings carrying `danger`;
+          painting both red would flatten the difference between ending a
+          session and erasing everything.
         */}
-        <View style={styles.dangerZone}>
+        <View style={styles.signOut}>
           <Button label="Sign Out" onPress={logout} variant="secondary" fullWidth />
-          <Button label="Delete Account" onPress={confirmDelete} variant="danger" fullWidth />
         </View>
       </ScrollView>
     </View>
@@ -330,36 +241,5 @@ const createStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     buttonRow: { flexDirection: 'row', gap: spacing.md },
     buttonSlot: { flex: 1 },
 
-    muted: {
-      fontSize: fontSize.sm,
-      color: c.textMuted,
-      lineHeight: scaledLine(fontSize.sm, 1.5),
-    },
-
-    themeRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      gap: spacing.lg,
-    },
-    themeText: { flex: 1, gap: 2 },
-    themeLabel: {
-      fontSize: fontSize.md,
-      fontWeight: fontWeight.semibold,
-      color: c.text,
-    },
-    resetLink: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: spacing.xs,
-      alignSelf: 'flex-start',
-      paddingVertical: spacing.xs,
-    },
-    resetText: {
-      fontSize: fontSize.sm,
-      fontWeight: fontWeight.medium,
-      color: c.primary,
-    },
-
-    dangerZone: { gap: spacing.md },
+    signOut: { gap: spacing.md },
   });

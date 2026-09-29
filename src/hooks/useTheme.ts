@@ -10,6 +10,8 @@ export interface UseThemeResult {
   preference: ThemePreference;
   setPreference: (next: ThemePreference) => void;
   toggle: () => void;
+  /** False until the persisted preference has been read. See `ThemeContext`. */
+  hydrated: boolean;
 }
 
 /**
@@ -35,5 +37,6 @@ export function useTheme(): UseThemeResult {
     preference: ctx.preference,
     setPreference: ctx.setPreference,
     toggle: ctx.toggle,
+    hydrated: ctx.hydrated,
   };
 }

@@ -9,6 +9,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 import type {
   Internship,
+  LoginAttemptState,
   NewInternship,
   NewTimeRecord,
   NewUser,
@@ -21,14 +22,15 @@ import type {
 
 export const insertUser = async (db: SQLiteDatabase, u: NewUser): Promise<number> => {
   const result = await db.runAsync(
-    `INSERT INTO users (full_name, email, password_hash, student_id, course, year_level)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO users (full_name, email, password_hash, student_id, course, year_level, block)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
     u.full_name,
     u.email,
     u.password_hash,
     u.student_id ?? null,
     u.course ?? null,
     u.year_level ?? null,
+    u.block ?? null,
   );
   return result.lastInsertRowId;
 };
@@ -47,17 +49,19 @@ export const updateUserProfile = (
     student_id: string | null;
     course: string | null;
     year_level: string | null;
+    block: string | null;
   },
 ) =>
   db.runAsync(
     `UPDATE users
-        SET full_name = ?, student_id = ?, course = ?, year_level = ?,
+        SET full_name = ?, student_id = ?, course = ?, year_level = ?, block = ?,
             updated_at = datetime('now')
       WHERE id = ?`,
     fields.full_name,
     fields.student_id,
     fields.course,
     fields.year_level,
+    fields.block,
     id,
   );
 
@@ -70,6 +74,68 @@ export const updateUserPasswordHash = (db: SQLiteDatabase, id: number, hash: str
 
 export const deleteUser = (db: SQLiteDatabase, id: number) =>
   db.runAsync('DELETE FROM users WHERE id = ?', [id]);
+
+// ── auth attempts ─────────────────────────────────────────────────────────
+
+/**
+ * The single counter row, created on first use.
+ *
+ * Seeding here rather than in the migration keeps one place responsible for the
+ * row existing. The fallback is unreachable in practice —
+ * `INSERT OR IGNORE` then `SELECT` on `id = 1` cannot miss — but the declared
+ * return type has to be honest, and a student staring at "Incorrect email or
+ * password" forever is a worse outcome than a silently fresh counter.
+ */
+export const getAuthAttemptState = async (db: SQLiteDatabase): Promise<LoginAttemptState> => {
+  await db.runAsync('INSERT OR IGNORE INTO auth_attempts (id) VALUES (1)');
+
+  const row = await db.getFirstAsync<LoginAttemptState>(
+    'SELECT failed_count, last_failure_at, locked_until FROM auth_attempts WHERE id = 1',
+  );
+
+  return row ?? { failed_count: 0, last_failure_at: null, locked_until: null };
+};
+
+/**
+ * Records one failure, and arms the lockout when `lockoutSeconds` is non-zero.
+ *
+ * The duration is an argument rather than computed here, because the backoff
+ * curve lives in `utils/rateLimiter` and `database/` must not import from
+ * `utils/` (vault note `Architecture` -> "Layering Rules"). Both values are
+ * bound; nothing is interpolated.
+ *
+ * An upsert, not a bare `UPDATE`. An `UPDATE` against a missing row matches
+ * zero rows and still reports success, so the counter would silently never move
+ * and the feature would look like it worked while permitting unlimited attempts.
+ * `WHERE ? > 0` also means a negative duration can never build a malformed
+ * modifier string.
+ */
+export const recordFailedAttempt = (db: SQLiteDatabase, lockoutSeconds: number) =>
+  db.runAsync(
+    `INSERT INTO auth_attempts (id, failed_count, last_failure_at, locked_until)
+       VALUES (1, 1,
+               strftime('%Y-%m-%dT%H:%M:%SZ', 'now'),
+               CASE WHEN ? > 0
+                 THEN strftime('%Y-%m-%dT%H:%M:%SZ', 'now', '+' || ? || ' seconds')
+                 ELSE NULL END)
+     ON CONFLICT(id) DO UPDATE SET
+       failed_count    = auth_attempts.failed_count + 1,
+       last_failure_at = excluded.last_failure_at,
+       locked_until    = excluded.locked_until`,
+    lockoutSeconds,
+    lockoutSeconds,
+  );
+
+/** Resets the counter after a successful login. Total: works with no row present. */
+export const clearAuthAttempts = (db: SQLiteDatabase) =>
+  db.runAsync(
+    `INSERT INTO auth_attempts (id, failed_count, last_failure_at, locked_until)
+       VALUES (1, 0, NULL, NULL)
+     ON CONFLICT(id) DO UPDATE SET
+       failed_count = 0,
+       last_failure_at = NULL,
+       locked_until = NULL`,
+  );
 
 // ── internships ──────────────────────────────────────────────────────────
 

@@ -17,6 +17,15 @@ export interface User {
   student_id: string | null;
   course: string | null;
   year_level: string | null;
+  /**
+   * The registrar's section for the student, e.g. `"3A"`.
+   *
+   * Not the same string as `year_level`, and not derivable from it: "3rd Year"
+   * is what the student says, "3A" is what the registrar says. The TMC form's
+   * `COURSE/BLOCK` cell prints this, and the document is signed by a supervisor,
+   * so the value is captured rather than guessed.
+   */
+  block: string | null;
   /** `datetime('now')`, UTC. */
   created_at: string;
   updated_at: string | null;
@@ -72,6 +81,7 @@ export interface NewUser {
   student_id?: string | null;
   course?: string | null;
   year_level?: string | null;
+  block?: string | null;
 }
 
 /** Fields required to create an internship. */
@@ -122,4 +132,24 @@ export interface TimeRecordFilter {
   to?: string | null;
   /** Case-insensitive substring matched against `notes`. Null or empty disables it. */
   search?: string | null;
+}
+
+/**
+ * The failed-login counter. One row only (`CHECK (id = 1)`), so there is no `id`
+ * to project and the row is addressed directly.
+ *
+ * Device-wide rather than per-account, deliberately. There is no server to
+ * coordinate a counter across, and a lockout keyed on the email could be sidestepped
+ * by typing a different one — which would not be a lockout.
+ */
+export interface LoginAttemptState {
+  failed_count: number;
+  /** ISO-8601 UTC with a `Z`. Cleared by a successful login. */
+  last_failure_at: string | null;
+  /**
+   * ISO-8601 UTC with a `Z` — **not** SQLite's `datetime('now')` output, which
+   * has no zone designator and is parsed by `Date` as local time. See
+   * `utils/rateLimiter` -> `secondsUntil`.
+   */
+  locked_until: string | null;
 }

@@ -47,7 +47,7 @@ export default function RootLayout() {
 }
 
 function ThemedStack() {
-  const { colors: c, mode } = useTheme();
+  const { colors: c, mode, hydrated } = useTheme();
   const screenOptions = useMemo(
     () => ({
       headerStyle: { backgroundColor: c.bg },
@@ -58,6 +58,17 @@ function ThemedStack() {
     }),
     [c],
   );
+
+  /*
+   * Nothing renders until the stored preference is read.
+   *
+   * The native splash is still up at this point — `index.tsx` releases it, and
+   * `index.tsx` is inside this navigator — so holding here costs no visible
+   * delay, and it is the only way to avoid a light flash for a dark-mode user on
+   * every cold launch. Rendering children first and correcting a frame later
+   * would show exactly that flash.
+   */
+  if (!hydrated) return null;
 
   return (
     <>

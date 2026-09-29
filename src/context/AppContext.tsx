@@ -101,6 +101,7 @@ export interface AppContextValue extends AppState {
     student_id: string | null;
     course: string | null;
     year_level: string | null;
+    block: string | null;
   }) => Promise<void>;
   deleteAccount: () => Promise<void>;
   refreshSummary: () => Promise<void>;
@@ -210,7 +211,13 @@ export const AppProvider = ({ children }: { children: React.ReactNode }) => {
   );
 
   const updateProfile = useCallback(
-    async (fields: { full_name: string; student_id: string | null; course: string | null; year_level: string | null }) => {
+    async (fields: {
+      full_name: string;
+      student_id: string | null;
+      course: string | null;
+      year_level: string | null;
+      block: string | null;
+    }) => {
       if (!state.user) return;
       dispatch({ type: 'busy', busy: true });
       try {

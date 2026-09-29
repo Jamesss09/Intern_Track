@@ -3,12 +3,13 @@ import {
   Alert,
   KeyboardAvoidingView,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
-import { router, useLocalSearchParams } from 'expo-router';
+import { useFocusEffect, router, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useForm, useWatch } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -17,15 +18,24 @@ import { useApp } from '@/hooks/useApp';
 import { useTheme } from '@/hooks/useTheme';
 import { Button, ControlledField } from '@/components/FormField';
 import { ScreenHeader } from '@/components/ScreenHeader';
+import { BottomSheet } from '@/components/BottomSheet';
+import { CalendarPicker } from '@/components/CalendarPicker';
 import * as timeRecordService from '@/services/timeRecordService';
 import { TimeCalculationError, computeTotalMinutes, minutesToHours } from '@/utils/timeCalculator';
 import { formatBreak, formatHours } from '@/utils/progressCalculator';
 import { formatDateWithWeekday, todayIso } from '@/utils/dateFormatter';
 import {
+  DateRestrictionError,
+  RESTRICTION_HINT,
+  isRecordableDate,
+  restrictionMessage,
+} from '@/utils/dateRestriction';
+import {
   contentWidth,
   fontSize,
   fontWeight,
   radius,
+  HIT_SIZE,
   scaledLine,
   spacing,
   NUMERIC,
@@ -95,8 +105,18 @@ export default function AddRecordScreen() {
   const isEdit = Number.isFinite(recordId) && recordId !== null;
 
   const [saving, setSaving] = useState(false);
+  const [calendarOpen, setCalendarOpen] = useState(false);
+  /**
+   * The date the edited record already holds, captured on load.
+   *
+   * It is what the current-day rule compares against: an update may keep its own
+   * date but may not move to another, and the stored value is the only place
+   * that knows what "its own" was. The service re-reads it before writing, so
+   * this feeds the form's own error message, not the guarantee.
+   */
+  const [existingDate, setExistingDate] = useState<string | null>(null);
 
-  const { control, handleSubmit, setValue } = useForm<RecordValues>({
+  const { control, handleSubmit, setValue, setError, formState } = useForm<RecordValues>({
     resolver: zodResolver(schema),
     defaultValues: {
       date: todayIso(),
@@ -116,6 +136,7 @@ export default function AddRecordScreen() {
 
     void timeRecordService.getRecordById(recordId).then((record) => {
       if (!record) return;
+      setExistingDate(record.date);
       setValue('date', record.date);
       setValue('time_in', record.time_in);
       setValue('time_out', record.time_out);
@@ -124,6 +145,29 @@ export default function AddRecordScreen() {
     });
   }, [isEdit, recordId, setValue]);
 
+  /**
+   * Re-seeds the date with today every time the form is opened.
+   *
+   * "Today" is captured when the form mounts, but a student who leaves the app
+   * open across midnight — or backgrounds it for the night and comes back in the
+   * morning — would otherwise be looking at yesterday and be refused by the
+   * service for a reason the screen never showed them.
+   *
+   * Safe to do unconditionally for a new record, because today is the only
+   * selectable day: there is no user choice here to clobber. An edit is left
+   * alone, since its date comes from the record.
+   *
+   * This covers reopening the form, not the screen being left open overnight —
+   * the service is what guarantees the rule there, and it will reject the write
+   * with a message rather than store the wrong day.
+   */
+  useFocusEffect(
+    useCallback(() => {
+      if (isEdit) return;
+      setValue('date', todayIso());
+    }, [isEdit, setValue]),
+  );
+
   // Live duration preview, so the effect of the break is visible before saving.
   // `useWatch` rather than `watch`, because the latter returns a function the
   // React Compiler refuses to memoise.
@@ -131,6 +175,13 @@ export default function AddRecordScreen() {
     control,
     name: ['date', 'time_in', 'time_out', 'break'],
   });
+
+  /**
+   * The date field renders its own error, because it is a `Pressable` and not a
+   * `ControlledField` — there is no `Controller` to lift `fieldState.error` from.
+   */
+  const dateError = formState.errors.date?.message;
+
   const preview = (() => {
     const breakMinutes = timeRecordService.parseBreakInput(brk);
     if (breakMinutes === null) return null;
@@ -143,6 +194,15 @@ export default function AddRecordScreen() {
 
   const onSubmit = handleSubmit(async (values) => {
     if (!internship) return;
+
+    // Belt before braces: the schema only checks the date's *format*, because
+    // the recordability rule depends on whether this is an edit. Checking it here
+    // puts the message under the field the user actually touched. The service
+    // re-checks regardless, and is the one that counts.
+    if (!isRecordableDate(values.date, existingDate)) {
+      setError('date', { message: restrictionMessage(values.date) });
+      return;
+    }
 
     const breakMinutes = timeRecordService.parseBreakInput(values.break);
     if (breakMinutes === null) return;
@@ -173,8 +233,14 @@ export default function AddRecordScreen() {
       await refreshSummary();
       router.back();
     } catch (error) {
+      /**
+       * Ordered by how specific the message is. A `DateRestrictionError` is the
+       * service saying the day is not allowed and it knows why; falling through
+       * to the generic "check for a duplicate day" would replace a real reason
+       * with a guess.
+       */
       const message =
-        error instanceof TimeCalculationError
+        error instanceof DateRestrictionError || error instanceof TimeCalculationError
           ? error.message
           : 'That record could not be saved. Check for a duplicate day.';
       Alert.alert('Could not save', message);
@@ -254,26 +320,64 @@ export default function AddRecordScreen() {
         </View>
 
         <View style={styles.form}>
-          <View style={styles.row}>
-            <View style={styles.rowItemWide}>
-              <ControlledField
-                control={control}
-                name="date"
-                label="Date"
-                autoCapitalize="none"
-                placeholder="2026-09-28"
-              />
-            </View>
-            <View style={styles.rowItemNarrow}>
-              <Button
-                label="Today"
-                onPress={() => setValue('date', todayIso())}
-                variant="secondary"
-                fullWidth
-                accessibilityHint="Fills the date field with today"
-              />
-            </View>
+          {/**
+           * A Pressable, not a text input.
+           *
+           * The date used to be a free-text `YYYY-MM-DD` field, which is exactly
+           * the thing this feature removes: any keyboard allows yesterday or
+           * tomorrow to be typed in. There is no way to express "only today" in a
+           * `TextInput`, so the value is now reachable only through the calendar
+           * below, and the service refuses anything else regardless.
+           */}
+          <View style={styles.dateField}>
+            <Text style={styles.dateLabel}>Date</Text>
+
+            <Pressable
+              onPress={() => setCalendarOpen(true)}
+              disabled={isEdit}
+              style={({ pressed }) => [
+                styles.dateRow,
+                isEdit && styles.dateRowLocked,
+                pressed && !isEdit && styles.dateRowPressed,
+              ]}
+              accessibilityRole="button"
+              accessibilityLabel={`Date, ${formatDateWithWeekday(date)}`}
+              accessibilityHint={
+                isEdit
+                  ? 'This day is already recorded. Times and notes can still be corrected.'
+                  : 'Opens a calendar where only today can be selected'
+              }
+              accessibilityState={{ disabled: isEdit }}
+            >
+              <Ionicons name="calendar-outline" size={18} color={c.textSubtle} />
+              <Text style={[styles.dateValue, isEdit && styles.dateValueLocked]}>
+                {formatDateWithWeekday(date)}
+              </Text>
+              {isEdit ? null : <Ionicons name="chevron-forward" size={18} color={c.textMuted} />}
+            </Pressable>
+
+            {dateError ? (
+              <Text style={styles.dateError}>{dateError}</Text>
+            ) : (
+              <Text style={styles.dateHint}>
+                {isEdit ? 'The date of a recorded day cannot be changed.' : RESTRICTION_HINT}
+              </Text>
+            )}
           </View>
+
+          <BottomSheet
+            visible={calendarOpen}
+            onClose={() => setCalendarOpen(false)}
+            title="Choose a date"
+          >
+            <CalendarPicker
+              selected={date}
+              onSelect={(iso) => {
+                setValue('date', iso, { shouldValidate: true });
+                setCalendarOpen(false);
+              }}
+            />
+          </BottomSheet>
 
           <View style={styles.row}>
             <View style={styles.rowItem}>
@@ -357,9 +461,38 @@ const createStyles = (c: ReturnType<typeof useTheme>['colors']) =>
      * *vertical* axis, collapsing the row to zero height.
      */
     rowItem: { flex: 1, minWidth: 140 },
-    rowItemWide: { flex: 2, minWidth: 140 },
-    rowItemNarrow: { flex: 1, minWidth: 140 },
     notes: { minHeight: 88, textAlignVertical: 'top' },
+
+    dateField: { gap: spacing.xs },
+    dateLabel: {
+      fontSize: fontSize.sm,
+      fontWeight: fontWeight.semibold,
+      color: c.textMuted,
+    },
+    /**
+     * Shaped like `FormField`'s `inputRow` so the date sits in the same visual
+     * rhythm as the fields below it, while being a button. Full width rather
+     * than paired with a "Today" shortcut — with one possible value there is
+     * nothing for a shortcut to do.
+     */
+    dateRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      minHeight: HIT_SIZE,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      backgroundColor: c.surface,
+      paddingHorizontal: spacing.md,
+    },
+    dateRowLocked: { backgroundColor: c.surfaceAlt, borderColor: c.border },
+    dateRowPressed: { backgroundColor: c.primarySoft, borderColor: c.primaryOutline },
+    dateValue: { flex: 1, fontSize: fontSize.md, color: c.text },
+    dateValueLocked: { color: c.textMuted },
+    dateError: { fontSize: fontSize.xs, color: c.danger, fontWeight: fontWeight.medium },
+    /** Matches `FormField`'s hint, including its `textMuted` contrast reasoning. */
+    dateHint: { fontSize: fontSize.xs, color: c.textMuted },
 
     preview: {
       backgroundColor: c.primarySoft,

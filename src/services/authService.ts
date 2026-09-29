@@ -9,6 +9,7 @@ import type { User } from '@/types';
 import { getDatabase } from '@/database/database';
 import * as queries from '@/database/queries';
 import { hashPassword, needsRehash, verifyPassword } from '@/utils/passwordHasher';
+import { computeLockout, secondsUntil } from '@/utils/rateLimiter';
 
 export interface RegisterInput {
   full_name: string;
@@ -17,7 +18,16 @@ export interface RegisterInput {
   student_id?: string | null;
   course?: string | null;
   year_level?: string | null;
+  block?: string | null;
 }
+
+/**
+ * Split out so the login screen can put the fixed half in a live region and the
+ * ticking half outside it. A countdown inside `accessibilityLiveRegion` is
+ * re-announced every second, which for a five-minute lockout means a screen
+ * reader that will not stop talking.
+ */
+const TOO_MANY_HEAD = 'Too many attempts.';
 
 /**
  * Deliberately vague. Telling a caller "that email is already registered" is a
@@ -39,7 +49,34 @@ export const AUTH_ERRORS = {
    */
   currentPasswordWrong: 'That is not your current password.',
   samePassword: 'Your new password must be different from the current one.',
+  /**
+   * A function, not a string, because the wait is the message. A student told
+   * only "too many attempts" has no idea whether to come back in half a minute
+   * or tomorrow, and guessing wrong means more failed attempts.
+   */
+  tooManyAttemptsHead: TOO_MANY_HEAD,
+  tooManyAttempts: (seconds: number) =>
+    `${TOO_MANY_HEAD} Try again in ${Math.max(1, Math.ceil(seconds))}s.`,
 } as const;
+
+/**
+ * Thrown instead of `invalidCredentials` once a lockout is armed.
+ *
+ * Carries `retryAfterSeconds` so the login screen can run a live countdown
+ * instead of parsing the number back out of the sentence above — a countdown
+ * that is a fixed 30 s while the text says "28s" is worse than no countdown.
+ * `AppContext`'s `message()` reads `.message`, so the alert still fills from
+ * context with no second error channel.
+ */
+export class TooManyAttemptsError extends Error {
+  readonly retryAfterSeconds: number;
+
+  constructor(retryAfterSeconds: number) {
+    super(AUTH_ERRORS.tooManyAttempts(retryAfterSeconds));
+    this.name = 'TooManyAttemptsError';
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+}
 
 export const normalizeEmail = (email: string): string => email.trim().toLowerCase();
 
@@ -57,12 +94,22 @@ export const register = async (input: RegisterInput): Promise<number> => {
     student_id: input.student_id?.trim() || null,
     course: input.course?.trim() || null,
     year_level: input.year_level?.trim() || null,
+    block: input.block?.trim().toUpperCase() || null,
   });
 };
 
 /** Returns the signed-in user, or throws `AUTH_ERRORS.invalidCredentials`. */
 export const login = async (email: string, password: string): Promise<User> => {
   const db = await getDatabase();
+
+  // Checked before the hash, deliberately. `verifyPassword` is 10,000 PBKDF2
+  // iterations of real wall-clock time, and making an already-locked user sit
+  // through it before being told to stop is a denial of service we would be
+  // handing to anyone holding the phone.
+  const attempts = await queries.getAuthAttemptState(db);
+  const lockedFor = secondsUntil(attempts.locked_until, new Date());
+  if (lockedFor > 0) throw new TooManyAttemptsError(lockedFor);
+
   const user = await queries.getUserByEmail(db, normalizeEmail(email));
 
   // Hash even when the user is missing, so a wrong email and a wrong password
@@ -70,7 +117,20 @@ export const login = async (email: string, password: string): Promise<User> => {
   const stored = user?.password_hash ?? (await hashPassword('no-such-user'));
   const ok = await verifyPassword(password, stored);
 
-  if (!user || !ok) throw new Error(AUTH_ERRORS.invalidCredentials);
+  if (!user || !ok) {
+    // `attempts` is still accurate: nothing has written to the counter since it
+    // was read, and JS ran to completion in between.
+    const next = computeLockout(attempts.failed_count + 1, attempts.locked_until, new Date());
+
+    await queries.recordFailedAttempt(db, next.retryAfterSeconds);
+    if (next.locked) throw new TooManyAttemptsError(next.retryAfterSeconds);
+
+    throw new Error(AUTH_ERRORS.invalidCredentials);
+  }
+
+  // A correct password ends the streak, so the next slip starts from zero rather
+  // than inheriting a count the student has already recovered from.
+  await queries.clearAuthAttempts(db);
 
   // Opportunistically upgrade hashes created with a lower iteration count.
   if (needsRehash(user.password_hash)) {
@@ -128,6 +188,7 @@ export const updateProfile = async (
     student_id: string | null;
     course: string | null;
     year_level: string | null;
+    block: string | null;
   },
 ): Promise<void> => {
   const db = await getDatabase();
@@ -137,6 +198,7 @@ export const updateProfile = async (
     student_id: fields.student_id?.trim() || null,
     course: fields.course?.trim() || null,
     year_level: fields.year_level?.trim() || null,
+    block: fields.block?.trim().toUpperCase() || null,
   });
 };
 

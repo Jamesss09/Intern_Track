@@ -19,6 +19,7 @@ import * as timeRecordService from '@/services/timeRecordService';
 import type { DailyTotal } from '@/services/timeRecordService';
 import { formatHours } from '@/utils/progressCalculator';
 import { formatShortDate, formatTimeRange, todayIso } from '@/utils/dateFormatter';
+import { firstNameOf } from '@/utils/nameFormatter';
 import {
   contentWidth,
   fontSize,
@@ -35,6 +36,9 @@ const RECENT_LIMIT = 4;
 
 export default function DashboardScreen() {
   const { user, internship, summary, refreshSummary } = useApp();
+  // `user` is non-null for the whole of this screen: `(tabs)/_layout.tsx`
+  // redirects to login for anything that is not authenticated, so every `?? ''`
+  // below is a type-narrowing fallback rather than a state this screen renders.
   const { colors: c, elevation } = useTheme();
   const styles = useMemo(() => createStyles(c), [c]);
 
@@ -80,6 +84,16 @@ export default function DashboardScreen() {
   }, [refreshSummary, load]);
 
   /**
+   * First name only, for the greeting.
+   *
+   * The full name is on the line directly below, so greeting with all of it
+   * repeats what the user can already read — and at display size it wraps to two
+   * lines on a 320 dp screen. The `?? ''` keeps the greeting to one line if the
+   * name is empty, rather than rendering "Hi there, !".
+   */
+  const firstName = firstNameOf(user?.full_name ?? '');
+
+  /**
    * The mockup's hero third line is a course and year. Both are optional on the
    * user record, so this falls back to the placement, which always exists.
    */
@@ -104,17 +118,20 @@ export default function DashboardScreen() {
     >
       {/*
         Not `ScreenHeader`. A hero is a different shape from the standard band —
-        a greeting, the full name at display size, and an avatar — and the
-        progress card below has to tuck *under* this one, which a fixed-height
-        header component has no way to allow.
+        a greeting at display size, the full name and placement under it, and an
+        avatar — and the progress card below has to tuck *under* this one, which
+        a fixed-height header component has no way to allow.
       */}
       <View style={styles.hero}>
         <View style={styles.heroInner}>
           <View style={styles.heroText}>
-            <Text style={styles.greeting}>Hello,</Text>
+            <Text style={styles.greeting} numberOfLines={1}>
+              {`Hi there, ${firstName}! 👋`}
+            </Text>
             <Text style={styles.name} numberOfLines={1}>
               {user?.full_name ?? 'there'}
             </Text>
+            <Text style={styles.overview}>Here&apos;s an overview of your OJT progress.</Text>
             {identity ? (
               <Text style={styles.identity} numberOfLines={1}>
                 {identity}
@@ -322,16 +339,46 @@ const createStyles = (c: ReturnType<typeof useTheme>['colors']) =>
       paddingHorizontal: spacing.lg,
     },
     heroText: { flex: 1, gap: 2 },
+    /**
+     * The display line, and the one that carries the user's name now.
+     *
+     * It was `sm` when it read only "Hello," with the name beside it at display
+     * size; the name moved into this line, so the weight moved with it. Sizing
+     * matters more than usual here — this is the only place the app greets the
+     * user by name, and it is the first thing on the first screen.
+     *
+     * `numberOfLines={1}` on the element. A long name at display size will
+     * truncate with an ellipsis, which is better than wrapping into a third hero
+     * line and pushing the progress card down the screen.
+     */
     greeting: {
-      fontSize: fontSize.sm,
-      color: c.onBrand,
-      opacity: 0.75,
-    },
-    name: {
       fontSize: fontSize.display,
       fontWeight: fontWeight.bold,
       color: c.onBrand,
       lineHeight: scaledLine(fontSize.display, 1.1),
+    },
+    /**
+     * The full name, demoted from display size.
+     *
+     * It is still here rather than dropped: it is what the school expects on the
+     * printed record, and the greeting truncates a long name. Same token as
+     * `identity` — both are the secondary "who are you" lines.
+     */
+    name: {
+      fontSize: fontSize.sm,
+      color: c.onBrand,
+      opacity: 0.75,
+    },
+    /**
+     * `onBrand` at 0.75, matching every other secondary line on the band. That
+     * is the floor for legible text on `brandDark` — going dimmer drops under
+     * 4.5:1 — so it is stated once here rather than dimmed further to
+     * distinguish it from `name`.
+     */
+    overview: {
+      fontSize: fontSize.xs,
+      color: c.onBrand,
+      opacity: 0.75,
     },
     identity: {
       fontSize: fontSize.sm,

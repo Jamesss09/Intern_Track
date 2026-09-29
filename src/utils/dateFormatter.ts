@@ -107,3 +107,71 @@ export const startOfMonthIso = (iso: string): string => {
 
 /** First day of the year containing `iso`, e.g. `2026-01-01`. */
 export const startOfYearIso = (iso: string): string => `${parseIsoDate(iso).getFullYear()}-01-01`;
+
+/**
+ * Number of days in the month containing `iso`, e.g. 30 for September, 31 for
+ * October.
+ *
+ * Day 0 of the *following* month is the last day of this one, which is why this
+ * uses `getMonth() + 1` and day `0` rather than hardcoding lengths — the TMC
+ * daily time record always prints 31 numbered rows, so the template needs to
+ * know which of them belong to a real day.
+ */
+export const daysInMonthIso = (iso: string): number => {
+  const d = parseIsoDate(iso);
+  return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate();
+};
+
+/** Last day of the month containing `iso`, e.g. `2026-09-30`. */
+export const endOfMonthIso = (iso: string): string => {
+  const d = parseIsoDate(iso);
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  return `${d.getFullYear()}-${m}-${String(daysInMonthIso(iso)).padStart(2, '0')}`;
+};
+
+/**
+ * First day of the month `months` away from the one containing `iso`.
+ *
+ * `setMonth` rather than arithmetic on the string, so the year rolls over on
+ * its own: `shiftMonthIso('2026-12-01', 1)` is `2027-01-01`. Callers pass a
+ * first-of-month (see `startOfMonthIso`), which is why the day-of-month
+ * rollover that `setMonth` would otherwise cause for the 29th–31st cannot
+ * happen — a month start is never past the 7th.
+ */
+export const shiftMonthIso = (iso: string, months: number): string => {
+  const d = parseIsoDate(iso);
+  d.setDate(1);
+  d.setMonth(d.getMonth() + months);
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  return `${d.getFullYear()}-${m}-01`;
+};
+
+/** `2026-09-01` -> `"September 2026"`. The heading on a monthly form. */
+export const monthLabel = (iso: string): string =>
+  new Intl.DateTimeFormat('en-GB', { month: 'long', year: 'numeric' }).format(parseIsoDate(iso));
+
+/**
+ * The days of the month containing `iso`, as a Monday-first grid.
+ *
+ * Leading `null`s pad the grid so the 1st lands under the right weekday, and
+ * the array is deliberately *not* padded out to whole weeks — `CalendarPicker`
+ * renders it with `flexWrap`, so a short last row is one line, and padding it
+ * with empty cells would add a phantom row's worth of height to every month.
+ *
+ * Monday-first to match the `en-GB` formatting used everywhere else in the app.
+ * `getDay()` is 0 = Sunday, so the +6 shift is what makes Monday column 0.
+ */
+export const buildMonthCells = (iso: string): (string | null)[] => {
+  const monthStart = startOfMonthIso(iso);
+  const first = parseIsoDate(monthStart);
+  const leading = (first.getDay() + 6) % 7;
+  const total = daysInMonthIso(monthStart);
+
+  const year = first.getFullYear();
+  const month = String(first.getMonth() + 1).padStart(2, '0');
+
+  return [
+    ...Array.from({ length: leading }, () => null),
+    ...Array.from({ length: total }, (_, i) => `${year}-${month}-${String(i + 1).padStart(2, '0')}`),
+  ];
+};
